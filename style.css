@@ -253,6 +253,11 @@
     transition: all 0.15s ease;
 }
 
+/* 编辑态 textarea：底色透明，避免加深层影响文字可读性 */
+#missSummarySettings .miss-record .miss-input[data-role="edit-text"] {
+    background: transparent;
+}
+
 #missSummarySettings .miss-btn:hover {
     border-color: var(--SmartThemeQuoteColor, #a05a2c);
     color: var(--SmartThemeQuoteColor, #a05a2c);
@@ -290,7 +295,7 @@
     overflow-y: auto;
     border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
     border-radius: var(--borderRadius, 10px);
-    background: var(--black30a, rgba(0, 0, 0, 0.25));
+    background: transparent;
     padding: 4px;
 }
 
@@ -307,11 +312,7 @@
     border: 1px solid transparent;
     border-radius: calc(var(--borderRadius, 10px) - 2px);
     margin: 3px 2px;
-    transition: background 0.15s ease;
-}
-
-#missSummarySettings .miss-record:hover {
-    background: var(--black30a, rgba(0, 0, 0, 0.2));
+    background: transparent; /* 无悬停/展开加深，保证任何主题下文字清晰 */
 }
 
 #missSummarySettings .miss-record.open {
