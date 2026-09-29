@@ -916,20 +916,23 @@ async function bindUi() {
         renderRecords();
     });
 
-    $('#miss-extract-btn', $drawer).on('click', () => {
+    $('#miss-extract-btn', $drawer).on('click', async () => {
         // 先把输入框当前值清洗同步到设置（用户可能没触发 change 就点抓取）
         sSync().tag = cleanTagList($('#miss-tag-input', $drawer).val());
         $('#miss-tag-input', $drawer).val(sSync().tag);
         saveSettings();
         if (!sSync().tag) {
-            toast('❌ 摘要标签为空，请先填写标签名（如 summary 或 <summary>，支持逗号分隔多个）');
+            toast('❌ 摘要标签为空，请先填写标签名（如 summary 或 <summary>，支持逗号分隔多个）', 'error');
             return;
         }
         recordsOpen.clear();
         editingId = null;
         renderRecords();
         const n = extractRecords().length;
-        toast(n ? `✅ 已抓取 ${n} 条摘要（${sSync().tag}）` : `未抓取到 <${sSync().tag}>...</${sSync().tag}> 包裹的内容`);
+        // 标签已保存 + 抓取结果，用 ST 弹窗明确告知
+        await popupConfirm(n
+            ? `✅ 摘要标签已保存：「${sSync().tag}」\n\n已抓取到 ${n} 条摘要内容，可在「记忆总结」页查看。`
+            : `✅ 摘要标签已保存：「${sSync().tag}」\n\n⚠️ 当前聊天中未抓取到 <${sSync().tag}>...</${sSync().tag}> 包裹的内容。`);
     });
 
     $('#miss-preset-select', $drawer).on('change', function () {
@@ -1083,7 +1086,7 @@ async function checkAuto() {
 async function runSummary(manual) {
     if (busy) {
         if (manual) {
-            toast('正在总结中，请稍候…');
+            toast('⏳ 正在总结中，请稍候…', 'warning');
         }
         return;
     }
@@ -1091,13 +1094,16 @@ async function runSummary(manual) {
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     if (!chat.length) {
         if (manual) {
-            toast('当前没有可总结的聊天记录');
+            toast('❌ 当前没有可总结的聊天记录', 'error');
         }
         return;
     }
 
     busy = true;
     setBusy(true);
+    if (manual) {
+        toast('🚀 开始总结…', 'info');
+    }
     const prevPreset = currentPresetName();
     try {
         const st = sSync();
@@ -1107,7 +1113,7 @@ async function runSummary(manual) {
 
         if (!msgs.length) {
             if (manual) {
-                toast('没有新的楼层需要总结');
+                toast('没有新的楼层需要总结', 'info');
             }
             return;
         }
@@ -1148,18 +1154,24 @@ async function runSummary(manual) {
                 wiName = await saveSummaryToWorldInfo(`总结${nextWiCounter()}`, content);
             } catch (e) {
                 log('worldinfo write failed', e);
-                toast(`⚠️ 世界书写入失败：${e?.message || e}`);
+                toast(`⚠️ 世界书写入失败：${e?.message || e}`, 'warning');
             }
         }
 
         renderRecords();
         await updateTokens();
         if (manual) {
-            toast(`✅ 记忆总结完成${via === 'subapi' ? '（副API）' : ''}${wiName ? `，已写入世界书「${wiName}」` : ''}`);
+            // 完成：ST 弹窗明确告知结果
+            await popupConfirm(
+                `✅ 总结已完成！\n\n`
+                + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
+                + `摘要标题：${title}\n`
+                + (wiName ? `已写入世界书：「${wiName}」（已绑定聊天世界书，条目蓝灯@D999）\n\n摘要可在「记忆总结」页查看。` : '\n摘要已存入记录。'),
+            );
         }
     } catch (e) {
         console.error('[MissSummary] summarize failed', e);
-        toast('❌ ' + (e?.message || '总结失败'));
+        toast(`❌ 总结失败：${e?.message || e}`, 'error');
     } finally {
         busy = false;
         setBusy(false);
@@ -1261,6 +1273,15 @@ async function saveSummaryToWorldInfo(name, content) {
         delay: null,
     };
     await wm.saveWorldInfo(name, data, true);
+
+    // 刷新 ST 世界书下拉列表（否则新世界书在 UI 列表里看不到）
+    try {
+        if (typeof wm.updateWorldInfoList === 'function') {
+            await wm.updateWorldInfoList();
+        }
+    } catch (e) {
+        log('updateWorldInfoList failed', e);
+    }
 
     // 绑定为聊天世界书（不是角色世界书、不是全局）
     try {
@@ -1693,18 +1714,37 @@ async function applySubApiSnapshot(name) {
 }
 
 // ---------------- 弹窗 / 提示 ----------------
+// 统一使用 SillyTavern 自带通知（toastr）与弹窗（callGenericPopup）
 
-function toast(msg) {
-    let $wrap = $('#miss_toast');
-    if (!$wrap.length) {
-        $wrap = $('<div id="miss_toast"></div>');
-        $('body').append($wrap);
+function toastrFn() {
+    return window.toastr || null;
+}
+
+// info/success/warning/error 四级通知，全部走 ST 自带 toastr
+function toast(msg, type = 'info') {
+    const t = toastrFn();
+    if (t && typeof t[type] === 'function') {
+        t[type](String(msg), 'Miss总结', { timeOut: 4000, preventDuplicates: false });
+        return;
     }
-    const $el = $('<div class="miss-toast"></div>').text(msg);
-    $wrap.append($el);
-    setTimeout(() => {
-        $el.fadeOut(250, () => $el.remove());
-    }, 2600);
+    // 极端兜底：toastr 不可用时走 ST Popup
+    popupMod().then(pm => {
+        if (pm?.callGenericPopup && pm?.POPUP_TYPE?.TEXT) {
+            pm.callGenericPopup(String(msg), pm.POPUP_TYPE.TEXT, '', { okButton: '确定' });
+        } else {
+            console.log('[MissSummary toast]', msg);
+        }
+    });
+}
+
+// 需要用户确认的重要结果弹窗（ST 自带样式）
+async function popupConfirm(message) {
+    const pm = await popupMod();
+    if (pm?.callGenericPopup && pm?.POPUP_TYPE?.TEXT) {
+        await pm.callGenericPopup(String(message), pm.POPUP_TYPE.TEXT, '', { okButton: '确定' });
+        return;
+    }
+    toastrFn()?.info?.(String(message), 'Miss总结');
 }
 
 // ---------------- 工具 ----------------
