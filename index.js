@@ -171,7 +171,12 @@ function defaultSettings() {
         tokenThreshold: 0,
         floorThreshold: 0,
         keepVisibleFloors: 0,
-        summaryPrompt: '请将以下聊天内容浓缩为一段简洁的第三人称记忆摘要，保留关键事件、人物关系与重要约定：\n\n',
+        summaryPrompt: '你是总结助手。请将以下聊天内容整理为一份详细的第三人称记忆摘要，要求：\n'
+            + '1. 按时间顺序记录所有关键事件、对话要点\n'
+            + '2. 保留所有人物的名字、关系变化、重要约定与承诺\n'
+            + '3. 记录情绪转折、伏笔与未解决的冲突\n'
+            + '4. 内容完整详实，篇幅依聊天内容多少而定，不要偷懒省略\n'
+            + '5. 直接输出摘要正文，不要任何解释或开场白\n\n',
         jailbreakPrompt: '',
         autoSummarize: true,
         autoHideFloors: false,  // 功能4：总结过的楼层自动隐藏
@@ -196,6 +201,11 @@ async function s() {
             if (es[MODULE][key] === undefined) {
                 es[MODULE][key] = defaultSettings()[key];
             }
+        }
+        // 迁移：旧版默认提示词导致总结过短，自动升级为详细版（用户自定义过则不动）
+        const OLD_PROMPT = '请将以下聊天内容浓缩为一段简洁的第三人称记忆摘要，保留关键事件、人物关系与重要约定：\n\n';
+        if (es[MODULE].summaryPrompt === OLD_PROMPT) {
+            es[MODULE].summaryPrompt = defaultSettings().summaryPrompt;
         }
         _settings = es[MODULE];
     }
@@ -1771,7 +1781,7 @@ async function writeSecretKey(key) {
     }
 }
 
-async function subApiGenerate(messages, { maxTokens = 800 } = {}) {
+async function subApiGenerate(messages, { maxTokens = 2048 } = {}) {
     const st = sSync();
     const cfg = st.subApi || {};
     const url = normalizeSubUrl(cfg.url);
@@ -1941,13 +1951,14 @@ async function generateSummaryText(chatText) {
     const ctx = getContext();
     let out;
     try {
-        out = await ctx.generateQuietPrompt({ quietPrompt: prompt });
+        // responseLength：给总结留足输出空间（覆盖酒馆回复长度设置，避免总结被截断）
+        out = await ctx.generateQuietPrompt({ quietPrompt: prompt, responseLength: 1024 });
     } catch (e) {
         log('object-arg generateQuietPrompt failed', e);
     }
     if (typeof out !== 'string' || !out.trim()) {
         try {
-            out = await ctx.generateQuietPrompt(prompt, false, false);
+            out = await ctx.generateQuietPrompt(prompt, false, false, null, null, 1024);
         } catch (e) {
             log('positional generateQuietPrompt failed', e);
         }
