@@ -182,7 +182,7 @@ function defaultSettings() {
         autoSummarize: true,
         autoHideFloors: false,  // 功能4：总结过的楼层自动隐藏
         // 副API设置
-        subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false },
+        subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false, temperature: '' },
         subApiSaved: {},   // { name: {type, source, url, key, model, stream} }
         subApiActive: '',  // 当前启用的副API配置名（''=用上面手动填写的）
         // 世界书
@@ -350,6 +350,10 @@ function buildDrawer() {
                             <div class="miss-inline-row" style="margin-top:4px;">
                                 <button id="miss-subapi-connect-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-plug-circle-check"></i> 连接</button>
                                 <button id="miss-subapi-test-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-paper-plane"></i> 发送测试消息</button>
+                            </div>
+                            <div class="miss-field" style="margin-top:8px;">
+                                <label for="miss-subapi-temperature" title="留空=跟随酒馆主API的温度设置；填写后副API总结使用此温度（0=最严谨，2=最随机）"><i class="fa-solid fa-temperature-half"></i> 副API温度（留空=跟随酒馆设置）</label>
+                                <input id="miss-subapi-temperature" class="miss-input" type="number" min="0" max="2" step="0.1" placeholder="留空=跟随酒馆（当前温度显示在下方状态）">
                             </div>
                             <label class="miss-check" title="仅对插件总结生效：开启后副API以流式(SSE)方式返回总结内容；不影响酒馆主聊天的流式设置">
                                 <input id="miss-subapi-stream-chk" type="checkbox"> 总结时开启 AI 流式传输（仅对插件总结生效）
@@ -1198,15 +1202,15 @@ async function reSummarizeAll() {
         const title = (content.split('\n')[0] || '').trim().slice(0, 24)
             || `重总摘要 ${summaries.length + 1}`;
 
-        // 生成新的合并摘要（保留旧摘要，追加新条目；不推进总结点，
-        // upTo 取旧摘要最大值——重总只是整合，不吞掉未总结的新楼层）
+        // 重新总结 = 把之前所有摘要全部重新总结成一份，【替换】旧摘要列表
+        // （不是在已总结的基础上追加；不推进总结点，upTo 取旧摘要最大值）
         let maxOldUpTo = -1;
         for (const s of summaries) {
             if (typeof s.upTo === 'number' && s.upTo > maxOldUpTo) {
                 maxOldUpTo = s.upTo;
             }
         }
-        store.summaries.push({ title, content, ts: Date.now(), upTo: maxOldUpTo, resummarized: true });
+        store.summaries = [{ title, content, ts: Date.now(), upTo: maxOldUpTo, resummarized: true }];
         await saveMetadata();
 
         // 写入世界书
@@ -1473,10 +1477,12 @@ async function runSummary(manual) {
         // 本次实际总结覆盖到的最后一楼（用于下次总结起点与隐藏范围）
         const lastSummarizedFloor = Math.max(...allRecords.map(r => r.msgId));
 
+        // chatText = 所有抓取记录的【完整内容】（r.content 是标签内全部文本，
+        // 不是标题；标题仅用于记录列表显示）
         const chatText = allRecords
-            .map(r => `[${r.tag} · 楼层 ${r.floor}]\n${r.content}`)
+            .map(r => `【${r.tag} · 第${r.floor}楼 · 以下为该楼摘要标签内的全部原文】\n${r.content}`)
             .join('\n\n');
-        // chatText 仅含抓取的摘要内容；提示词结构由 buildSummaryMessages 构造
+        // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
 
         if (st.boundPreset) {
@@ -1809,7 +1815,7 @@ async function writeSecretKey(key) {
     }
 }
 
-async function subApiGenerate(messages, { maxTokens = 2048 } = {}) {
+async function subApiGenerate(messages) {
     const st = sSync();
     const cfg = st.subApi || {};
     const url = normalizeSubUrl(cfg.url);
@@ -1822,12 +1828,33 @@ async function subApiGenerate(messages, { maxTokens = 2048 } = {}) {
         await writeSecretKey(cfg.key);
     }
     const stream = !!cfg.stream;
+    // max_tokens / temperature：跟随酒馆当前设置（无插件自有上限）
+    let maxTokens;
+    let temperature;
+    try {
+        const mod = await getSTModule();
+        const oai = mod?.oai_settings;
+        // openai_max_tokens = 酒馆「回复长度」；temp_openai = 酒馆「温度」
+        const ot = Number(oai?.openai_max_tokens);
+        if (Number.isFinite(ot) && ot > 0) {
+            maxTokens = ot;
+        }
+        const tp = Number(oai?.temp_openai);
+        if (Number.isFinite(tp)) {
+            temperature = tp;
+        }
+    } catch { /* 取不到就跟随 API 默认 */ }
+    // 用户在副API设置里自定义了温度则覆盖酒馆值
+    const userTemp = Number(cfg.temperature);
+    if (Number.isFinite(userTemp)) {
+        temperature = userTemp;
+    }
     const body = {
         chat_completion_source: source,
         model: String(cfg.model || 'gpt-4o-mini'),
         messages,
         max_tokens: maxTokens,
-        temperature: 0.7,
+        temperature,
         stream,
         custom_url: url,
         custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
@@ -2011,6 +2038,7 @@ function renderSubApi() {
     $('#miss-subapi-key', $drawer).val(cfg.key || '');
     $('#miss-subapi-model', $drawer).val(cfg.model || '');
     $('#miss-subapi-stream-chk', $drawer).prop('checked', !!cfg.stream);
+    $('#miss-subapi-temperature', $drawer).val(cfg.temperature ?? '');
     $('#miss-subapi-source-row', $drawer).toggle(String(cfg.type || 'openai') === 'openai');
     // 已保存列表
     const names = Object.keys(st.subApiSaved || {});
@@ -2038,6 +2066,8 @@ function readSubApiForm() {
     st.subApi.key = String($('#miss-subapi-key', $drawer).val() || '');
     st.subApi.model = String($('#miss-subapi-model', $drawer).val() || '').trim();
     st.subApi.stream = $('#miss-subapi-stream-chk', $drawer).prop('checked');
+    const rawTemp = $('#miss-subapi-temperature', $drawer).val();
+    st.subApi.temperature = rawTemp === '' || rawTemp == null ? '' : Math.min(2, Math.max(0, Number(rawTemp)));
     return st.subApi;
 }
 
@@ -2057,7 +2087,7 @@ function bindSubApiUi() {
         saveSettings();
         renderSubApi();
     });
-    $drawer.on('change', '#miss-subapi-source, #miss-subapi-url, #miss-subapi-key, #miss-subapi-model', function () {
+    $drawer.on('change', '#miss-subapi-source, #miss-subapi-url, #miss-subapi-key, #miss-subapi-model, #miss-subapi-temperature', function () {
         readSubApiForm();
         saveSettings();
     });
@@ -2160,6 +2190,7 @@ function bindSubApiUi() {
             model: st.subApi.model,
             connected: !!st.subApi.connected,
             stream: !!st.subApi.stream,
+            temperature: st.subApi.temperature ?? '',
             savedAt: Date.now(),
         };
         st.subApiActive = name;
@@ -2225,6 +2256,7 @@ async function applySubApiSnapshot(name) {
         model: snap.model || '',
         connected: !!snap.connected,
         stream: !!snap.stream,
+        temperature: snap.temperature ?? '',
     };
     st.subApiActive = name;
     saveSettings();
