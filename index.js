@@ -119,12 +119,30 @@ async function getSetExtensionPrompt() {
     return mod?.setExtensionPrompt || (() => { });
 }
 
+async function getPromptTypesAsync() {
+    if (window.extension_prompt_types) {
+        return window.extension_prompt_types;
+    }
+    const mod = await stMod();
+    return mod?.extension_prompt_types || { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
+}
+
+async function getPromptRolesAsync() {
+    if (window.extension_prompt_roles) {
+        return window.extension_prompt_roles;
+    }
+    const mod = await stMod();
+    return mod?.extension_prompt_roles || { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
+}
+
 function getPromptTypes() {
-    return window.extension_prompt_types || { NONE: 0, IN_PROMPT: 1, IN_CHAT: 2 };
+    // ST 真实值：NONE=-1, IN_PROMPT=0, IN_CHAT=1, BEFORE_PROMPT=2（不挂全局，需从模块取）
+    return window.extension_prompt_types || { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 };
 }
 
 function getPromptRoles() {
-    return window.extension_prompt_roles || { SYSTEM: 'system', USER: 'user', ASSISTANT: 'assistant' };
+    // ST 真实值：SYSTEM=0, USER=1, ASSISTANT=2（数字枚举，非字符串）
+    return window.extension_prompt_roles || { SYSTEM: 0, USER: 1, ASSISTANT: 2 };
 }
 // ---- 本地保存包装 ----
 async function saveSettings() {
@@ -154,6 +172,7 @@ function defaultSettings() {
         floorThreshold: 0,
         keepVisibleFloors: 0,
         summaryPrompt: '请将以下聊天内容浓缩为一段简洁的第三人称记忆摘要，保留关键事件、人物关系与重要约定：\n\n',
+        jailbreakPrompt: '',
         autoSummarize: true,
         autoHideFloors: false,  // 功能4：总结过的楼层自动隐藏
         // 副API设置
@@ -253,6 +272,7 @@ function buildDrawer() {
             <div class="miss-nav">
                 <button class="miss-nav-btn active" data-tab="setup"><i class="fa-solid fa-sliders"></i> 初始设置</button>
                     <button class="miss-nav-btn" data-tab="memory"><i class="fa-solid fa-brain"></i> 记忆总结</button>
+                    <button class="miss-nav-btn" data-tab="prompts"><i class="fa-solid fa-feather"></i> 提示词</button>
                 </div>
 
                 <div class="miss-panel active" id="miss-panel-setup">
@@ -348,9 +368,14 @@ function buildDrawer() {
 
                 <div class="miss-panel" id="miss-panel-memory">
                     <div class="miss-field">
-                        <label><i class="fa-solid fa-scroll"></i> 记录（标签抓取）</label>
-                        <div class="miss-records-scroll">
-                            <div id="miss-records-list"></div>
+                        <div class="miss-collapse-header interactable" id="miss-records-toggle" tabindex="0">
+                            <b><i class="fa-solid fa-scroll"></i> 记录（标签抓取）</b>
+                            <i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i>
+                        </div>
+                        <div class="miss-collapse-body" id="miss-records-body" style="display:none;">
+                            <div class="miss-records-scroll">
+                                <div id="miss-records-list"></div>
+                            </div>
                         </div>
                     </div>
 
@@ -386,31 +411,46 @@ function buildDrawer() {
                                 <input id="miss-floor-threshold" class="miss-input" type="number" min="0" placeholder="0=关闭">
                             </div>
                             <div>
-                                <label for="miss-keep-floors">隐藏楼层</label>
+                                <label for="miss-keep-floors" title="保留最近 N 个角色楼层（不含用户楼层），之前的所有楼层（包括用户楼层）全部隐藏，只注入摘要内容">隐藏楼层（保留最近 N 个角色楼）</label>
                                 <input id="miss-keep-floors" class="miss-input" type="number" min="0" placeholder="0=关闭">
                             </div>
                         </div>
-                        <label for="miss-summary-prompt" style="margin-top:8px;">总结提示词</label>
-                        <textarea id="miss-summary-prompt" class="miss-input" rows="3"></textarea>
                         <label class="miss-check" title="勾选后：当新楼层满「楼层总结」楼，或总 Token 满「Token 总结」时，插件自动调用 AI 总结一次，无需手动点按钮">
                             <input id="miss-auto-chk" type="checkbox"> 自动总结（达到上方阈值时插件自动触发，不勾选则只能手动点「立即总结」）
                         </label>
-                        <label class="miss-check" title="勾选后：已被总结覆盖的楼层（≤最新摘要的 upTo 楼）自动标记为隐藏，发送给 AI 的提示词中将不再包含这些楼层的聊天记录，仅注入摘要内容">
-                            <input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏楼层（总结过的楼层不再发给 AI，只注入摘要）
+                        <label class="miss-check" title="勾选后：总结完成后只保留最近 1 楼，其余楼层（包括用户输入的楼层）全部隐藏，且不注入任何摘要——AI 只看到最近 1 楼 + 世界书">
+                            <input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏楼层（总结后只保留最近 1 楼，其余含用户楼层全部隐藏，不注入摘要）
                         </label>
                         <div class="miss-inline-row" style="margin-top:6px;">
                             <button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button>
                         </div>
-                        <div class="miss-hint">总结针对当前打开的角色卡聊天记录，更换角色后 Token 数与记录会实时更新。隐藏楼层：仅保留最近 N 楼发给 AI，更早的楼层自动隐藏，只注入摘要内容。</div>
+                        <div class="miss-hint">总结针对当前打开的角色卡聊天记录，更换角色后 Token 数与记录会实时更新。<b>隐藏楼层N</b>：保留最近 N 个<b>角色楼层</b>（不含用户楼层），之前的所有楼层（<b>包括用户楼层</b>）全部隐藏，只注入摘要；<b>自动隐藏</b>：总结后只保留最近 1 楼，其余（含用户楼层）全部隐藏，<b>什么都不注入</b>（摘要也隐藏，AI 只看到最近 1 楼+世界书）。总结/破限提示词在「提示词」分类中设置。</div>
+                    </div>
+                </div>
+
+                <div class="miss-panel" id="miss-panel-prompts">
+                    <div class="miss-field">
+                        <label for="miss-jailbreak-prompt" style="margin-top:8px;"><i class="fa-solid fa-unlock"></i> 破限提示词（身份：系统，位于最前）</label>
+                        <textarea id="miss-jailbreak-prompt" class="miss-input" rows="4" placeholder="自定义破限提示词，总结时以系统身份插在最前"></textarea>
+                        <div class="miss-hint">总结请求时以 <b>system</b> 角色放在第一条；留空则不发送。</div>
+                    </div>
+                    <div class="miss-field">
+                        <label for="miss-summary-prompt-p"><i class="fa-solid fa-feather"></i> 总结提示词（身份：系统，位于破限之后）</label>
+                        <textarea id="miss-summary-prompt-p" class="miss-input" rows="4" placeholder="总结指令，将以系统身份发送"></textarea>
+                        <div class="miss-hint">总结请求时以 <b>system</b> 角色发送，位于破限提示词之后、聊天内容之前。最终结构：[system 破限] → [system 总结指令] → [user 聊天内容]。</div>
                     </div>
                 </div>
             </div>
     </div>`;
 
-    const host = document.getElementById('extensions_settings2')
-        || document.getElementById('extensions_settings');
-    if (host) {
-        host.insertAdjacentHTML('afterbegin', html);
+    // 面板不再注入扩展设置区（功能1：只在魔法棒弹窗中显示）
+    // 先挂到一个隐藏容器保证 jQuery 选择器可用，openPanel 时再搬进 ST Popup
+    if (!document.getElementById('missSummarySettings')) {
+        const holder = document.createElement('div');
+        holder.id = 'missSummaryHolder';
+        holder.style.display = 'none';
+        holder.innerHTML = html;
+        document.body.appendChild(holder);
     }
     $drawer = $('#missSummarySettings');
 }
@@ -470,11 +510,10 @@ async function openPanel() {
             allowVerticalScrolling: true,
             okButton: '关闭',
             onClosing: () => {
-                // 关闭后面板搬回扩展设置区，保持扩展面板里也始终可用
-                const host = document.getElementById('extensions_settings2')
-                    || document.getElementById('extensions_settings');
-                if (block && host && !host.contains(block)) {
-                    host.insertAdjacentElement('afterbegin', block);
+                // 关闭后面板搬回隐藏容器（扩展区不再显示，功能1）
+                const holder = document.getElementById('missSummaryHolder');
+                if (block && holder && !holder.contains(block)) {
+                    holder.appendChild(block);
                 }
                 return true;
             },
@@ -526,12 +565,11 @@ function closePanel() {
         return;
     }
     $modal.removeClass('visible').fadeOut(150, () => {
-        // 把面板搬回扩展设置区，保持扩展面板里也始终可用
+        // 把面板搬回隐藏容器（扩展区不显示，功能1）
         const block = document.getElementById('missSummarySettings');
-        const host = document.getElementById('extensions_settings2')
-            || document.getElementById('extensions_settings');
-        if (block && host && !host.contains(block)) {
-            host.insertAdjacentElement('afterbegin', block);
+        const holder = document.getElementById('missSummaryHolder');
+        if (block && holder && !holder.contains(block)) {
+            holder.appendChild(block);
         }
         $modal.css('display', '');
     });
@@ -669,6 +707,8 @@ function renderAll() {
     $('#miss-floor-threshold', $drawer).val(st.floorThreshold || '');
     $('#miss-keep-floors', $drawer).val(st.keepVisibleFloors || '');
     $('#miss-summary-prompt', $drawer).val(st.summaryPrompt || '');
+    $('#miss-summary-prompt-p', $drawer).val(st.summaryPrompt || '');
+    $('#miss-jailbreak-prompt', $drawer).val(st.jailbreakPrompt || '');
     $('#miss-auto-chk', $drawer).prop('checked', !!st.autoSummarize);
     $('#miss-hide-floors-chk', $drawer).prop('checked', !!st.autoHideFloors);
     renderRecords();
@@ -1023,8 +1063,15 @@ async function bindUi() {
         sSync().keepVisibleFloors = Math.max(0, Number($(this).val()) || 0);
         saveSettings();
     });
-    $('#miss-summary-prompt', $drawer).on('change', function () {
+    $('#miss-summary-prompt, #miss-summary-prompt-p', $drawer).on('change', function () {
+        // 两个输入框双向同步（同一份数据，两个分类入口）
         sSync().summaryPrompt = String($(this).val() || '');
+        $('#miss-summary-prompt', $drawer).val(sSync().summaryPrompt);
+        $('#miss-summary-prompt-p', $drawer).val(sSync().summaryPrompt);
+        saveSettings();
+    });
+    $('#miss-jailbreak-prompt', $drawer).on('change', function () {
+        sSync().jailbreakPrompt = String($(this).val() || '');
         saveSettings();
     });
     $('#miss-auto-chk', $drawer).on('change', function () {
@@ -1044,6 +1091,12 @@ async function bindUi() {
     // 已总结摘要折叠栏：展开/收起
     $drawer.on('click', '#miss-summaries-toggle', function () {
         $('#miss-summaries-body', $drawer).slideToggle(150);
+        $(this).find('.miss-collapse-icon').toggleClass('open');
+    });
+
+    // 记录（标签抓取）折叠栏：展开/收起（功能2）
+    $drawer.on('click', '#miss-records-toggle', function () {
+        $('#miss-records-body', $drawer).slideToggle(150);
         $(this).find('.miss-collapse-icon').toggleClass('open');
     });
 
@@ -1119,11 +1172,11 @@ async function reSummarizeAll() {
     try {
         const st = sSync();
         const combined = oldTexts.join('\n\n');
-        const prompt = `${st.summaryPrompt || defaultSettings().summaryPrompt}以下是之前多次总结出的记忆摘要，请把它们重新整合为一份更精炼、按时间线组织的完整摘要：\n\n${combined}`;
+        const chatText = `以下是之前多次总结出的记忆摘要，请把它们重新整合为一份更精炼、按时间线组织的完整摘要：\n\n${combined}`;
 
         let text, via;
         try {
-            ({ text, via } = await generateSummaryText(prompt));
+            ({ text, via } = await generateSummaryText(chatText));
         } catch (e) {
             throw e;
         }
@@ -1196,22 +1249,16 @@ async function onGeneration() {
     const keep = Number(st.keepVisibleFloors) || 0;
     const ctx = getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-
-    // 功能4：自动隐藏楼层 — 隐藏所有已被总结覆盖的楼层（≤ 最新摘要的 upTo）
-    // 否则退回旧行为：仅保留最近 keep 楼
-    let hideUpTo = -1;
-    if (st.autoHideFloors) {
-        const summaries = getStore().summaries || [];
-        for (const s of summaries) {
-            if (typeof s.upTo === 'number' && s.upTo > hideUpTo) {
-                hideUpTo = s.upTo;
-            }
-        }
+    if (!chat.length) {
+        return;
     }
 
-    if (hideUpTo >= 0) {
-        let changed = false;
-        const from = Math.min(hideUpTo + 1, chat.length);
+    let changed = false;
+
+    if (st.autoHideFloors) {
+        // ===== 自动隐藏（规则：总结后只保留最近 1 楼，其余全隐藏含用户楼层，不注入摘要）=====
+        // 隐藏范围：0 .. chat.length-2（保留最后 1 楼）
+        const from = chat.length - 1;
         for (let i = 0; i < from; i++) {
             const m = chat[i];
             if (m && !m.is_system) {
@@ -1220,12 +1267,23 @@ async function onGeneration() {
             }
         }
         if (changed) {
-            log(`自动隐藏楼层：已隐藏 0~${from - 1} 楼（已总结部分），仅注入摘要`);
+            log(`自动隐藏：已隐藏 0~${from - 1} 楼（含用户楼层），仅保留最近 1 楼，不注入摘要`);
         }
     } else if (keep > 0 && chat.length > keep) {
-        let changed = false;
-        const from = chat.length - keep;
-        for (let i = 0; i < from; i++) {
+        // ===== 自定义隐藏楼层 N（规则：保留最近 N 个角色楼层（不含用户楼层），
+        //       其余全部隐藏（含所有用户楼层），注入摘要）=====
+        // 从尾部往前数 N 个非用户楼层，记下起点 beforeIdx；0..beforeIdx-1 全隐藏
+        let counted = 0;
+        let beforeIdx = chat.length; // 保留区间的起点（之前全部隐藏）
+        for (let i = chat.length - 1; i >= 0 && counted < keep; i--) {
+            const m = chat[i];
+            if (m && !m.is_user && !m.is_system) {
+                counted++;
+                beforeIdx = i; // 最近保留的角色楼层
+            }
+        }
+        // 隐藏 0 .. beforeIdx-1（含用户楼层与更早的角色楼层）
+        for (let i = 0; i < beforeIdx; i++) {
             const m = chat[i];
             if (m && !m.is_system) {
                 m.is_system = true;
@@ -1233,19 +1291,24 @@ async function onGeneration() {
             }
         }
         if (changed) {
-            log(`隐藏楼层：已隐藏前 ${from} 楼，仅保留最近 ${keep} 楼`);
+            log(`自定义隐藏楼层：保留最近 ${keep} 个角色楼层（第 ${beforeIdx} 楼起），之前全部隐藏（含用户楼层），注入摘要`);
         }
     }
 
     try {
-        const texts = getStore().summaries.map(x => x.content).filter(Boolean);
+        // 注入摘要规则（功能4 最终版）：
+        // - 自动隐藏开启 → 不注入摘要（什么也不给）
+        // - 自定义隐藏楼层 → 注入摘要（补全被隐藏楼层的内容）
+        const injectEnabled = !st.autoHideFloors;
+        const pt = await getPromptTypesAsync();
+        const pr = await getPromptRolesAsync();
+        const sep = await getSetExtensionPrompt();
+        const texts = injectEnabled ? getStore().summaries.map(x => x.content).filter(Boolean) : [];
         if (texts.length) {
             const injection = '[以下是更早剧情的记忆摘要]\n' + texts.join('\n---\n');
-            const sep = await getSetExtensionPrompt();
-            sep(MODULE, injection, getPromptTypes().IN_CHAT, 4, false, getPromptRoles().SYSTEM);
+            sep(MODULE, injection, pt.IN_CHAT, 4, false, pr.SYSTEM);
         } else {
-            const sep = await getSetExtensionPrompt();
-        sep(MODULE, '', getPromptTypes().NONE, 0);
+            sep(MODULE, '', pt.NONE, 0);
         }
     } catch (e) {
         log('inject failed', e);
@@ -1315,7 +1378,8 @@ async function runSummary(manual) {
         const chatText = msgs
             .map(m => `${m.is_user ? '用户' : '角色'}: ${m.mes}`)
             .join('\n');
-        const prompt = String(st.summaryPrompt || '') + chatText;
+        // chatText 仅含聊天内容；提示词结构由 buildSummaryMessages 构造
+        const prompt = chatText;
 
         if (st.boundPreset) {
             const ok = await applyPreset(st.boundPreset);
@@ -1756,17 +1820,36 @@ async function subApiFetchModels() {
     }
 }
 
-// 总结时选用的生成通道：副API → 酒馆当前 API
-async function generateSummaryText(prompt) {
+// 构造总结消息数组：[system 破限(可选)] → [system 总结指令] → [user 聊天内容]
+function buildSummaryMessages(chatText) {
     const st = sSync();
+    const msgs = [];
+    const jb = String(st.jailbreakPrompt || '').trim();
+    const sp = String(st.summaryPrompt || defaultSettings().summaryPrompt).trim();
+    if (jb) {
+        msgs.push({ role: 'system', content: jb });
+    }
+    msgs.push({ role: 'system', content: sp });
+    msgs.push({ role: 'user', content: chatText });
+    return msgs;
+}
+
+// 总结时选用的生成通道：副API → 酒馆当前 API
+async function generateSummaryText(chatText) {
+    const st = sSync();
+    const messages = buildSummaryMessages(chatText);
+
     if (st.subApi?.url) {
         try {
-            return { text: await subApiGenerate([{ role: 'user', content: prompt }]), via: 'subapi' };
+            return { text: await subApiGenerate(messages), via: 'subapi' };
         } catch (e) {
             log('subApi generate failed, fallback to ST API', e);
-            toast(`⚠️ 副API失败（${e?.message || e}），改用酒馆当前API`);
+            toast(`⚠️ 副API失败（${e?.message || e}），改用酒馆当前API`, 'warning');
         }
     }
+    // 主 API：把消息数组串成 quiet prompt（system 部分前置）
+    const systemPart = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
+    const prompt = `${systemPart}\n\n${chatText}`;
     const ctx = getContext();
     let out;
     try {
