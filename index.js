@@ -155,6 +155,13 @@ function defaultSettings() {
         keepVisibleFloors: 0,
         summaryPrompt: '请将以下聊天内容浓缩为一段简洁的第三人称记忆摘要，保留关键事件、人物关系与重要约定：\n\n',
         autoSummarize: true,
+        // 副API设置
+        subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false },
+        subApiSaved: {},   // { name: {type, source, url, key, model} }
+        subApiActive: '',  // 当前启用的副API配置名（''=用上面手动填写的）
+        // 世界书
+        wiEnabled: true,
+        wiCounter: 0,
     };
 }
 
@@ -211,6 +218,8 @@ async function init() {
     addMenuButton();
     log('step 4/6: bind ui');
     await bindUi();
+    bindSubApiUi();
+    renderSubApi();
     log('step 5/6: presets');
     await refreshPresets();
     log('step 6/6: render');
@@ -261,6 +270,75 @@ function buildDrawer() {
                             <option value="">不绑定（默认）</option>
                         </select>
                         <div class="miss-hint">选择一个预设并绑定摘要标签，切换预设即可使用对应的摘要标签抓取，无需手动保存。</div>
+                    </div>
+
+                    <div class="miss-field">
+                        <div class="miss-collapse-header interactable" id="miss-subapi-toggle" tabindex="0">
+                            <b><i class="fa-solid fa-plug"></i> 副API设置</b>
+                            <i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i>
+                        </div>
+                        <div class="miss-collapse-body" id="miss-subapi-body" style="display:none;">
+                            <div class="miss-field">
+                                <label for="miss-subapi-type"><i class="fa-solid fa-network-wired"></i> API 类型</label>
+                                <select id="miss-subapi-type" class="miss-input">
+                                    <option value="openai">Chat 补全（OpenAI 兼容 / Claude / Gemini 等）</option>
+                                    <option value="textgenerationwebui">文本补全（TextGen / ooba / Tabby 等）</option>
+                                    <option value="kobold">KoboldAI</option>
+                                </select>
+                            </div>
+                            <div class="miss-field" id="miss-subapi-source-row">
+                                <label for="miss-subapi-source"><i class="fa-solid fa-diagram-project"></i> Chat 补全来源</label>
+                                <select id="miss-subapi-source" class="miss-input">
+                                    <option value="custom">自定义（兼容 OpenAI）</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="claude">Claude</option>
+                                    <option value="makersuite">Google AI (Gemini)</option>
+                                    <option value="openrouter">OpenRouter</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="groq">Groq</option>
+                                    <option value="mistralai">MistralAI</option>
+                                    <option value="cohere">Cohere</option>
+                                </select>
+                            </div>
+                            <div class="miss-field">
+                                <label for="miss-subapi-url"><i class="fa-solid fa-globe"></i> API 地址（含端口，如 http://127.0.0.1:5000/v1）</label>
+                                <input id="miss-subapi-url" class="miss-input" type="text" placeholder="http://127.0.0.1:5000/v1">
+                            </div>
+                            <div class="miss-field">
+                                <label for="miss-subapi-key"><i class="fa-solid fa-key"></i> API 密钥（本地服务可留空）</label>
+                                <input id="miss-subapi-key" class="miss-input" type="password" placeholder="sk-...">
+                            </div>
+                            <div class="miss-field">
+                                <label for="miss-subapi-model"><i class="fa-solid fa-cube"></i> 模型</label>
+                                <div class="miss-inline-row">
+                                    <input id="miss-subapi-model" class="miss-input" type="text" placeholder="模型名，或点右侧拉取">
+                                    <button id="miss-subapi-models-btn" class="miss-btn" title="拉取模型列表"><i class="fa-solid fa-cloud-arrow-down"></i></button>
+                                </div>
+                            </div>
+                            <div class="miss-inline-row" style="margin-top:4px;">
+                                <button id="miss-subapi-connect-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-plug-circle-check"></i> 连接</button>
+                                <button id="miss-subapi-test-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-paper-plane"></i> 发送测试消息</button>
+                            </div>
+                            <div id="miss-subapi-status" class="miss-hint" style="margin-top:6px;">未连接。总结时如绑定了副API将使用此 API 生成摘要；未绑定则使用酒馆当前连接的 API。</div>
+
+                            <div class="miss-field" style="margin-top:12px;">
+                                <div class="miss-collapse-header interactable" id="miss-subapi-saved-toggle" tabindex="0">
+                                    <b><i class="fa-solid fa-floppy-disk"></i> 保存与选择 API</b>
+                                    <i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i>
+                                </div>
+                                <div class="miss-collapse-body" id="miss-subapi-saved-body" style="display:none;">
+                                    <div class="miss-inline-row">
+                                        <input id="miss-subapi-save-name" class="miss-input" type="text" placeholder="为当前副API配置起一个名字">
+                                        <button id="miss-subapi-save-btn" class="miss-btn primary" title="保存当前配置"><i class="fa-solid fa-check"></i></button>
+                                    </div>
+                                    <div class="miss-inline-row" style="margin-top:6px;">
+                                        <select id="miss-subapi-saved-select" class="miss-input"></select>
+                                        <button id="miss-subapi-saved-delete" class="miss-btn" title="删除所选"><i class="fa-solid fa-trash"></i></button>
+                                    </div>
+                                    <div class="miss-hint">保存多个副API配置后，在此选择即可立即切换启用哪个副API。</div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -1046,34 +1124,38 @@ async function runSummary(manual) {
             }
         }
 
-        let out;
+        let text, via;
         try {
-            out = await ctx.generateQuietPrompt({ quietPrompt: prompt });
+            ({ text, via } = await generateSummaryText(prompt));
         } catch (e) {
-            log('object-arg generateQuietPrompt failed', e);
+            log('generateSummaryText failed', e);
+            throw e;
         }
-        if (typeof out !== 'string' || !out.trim()) {
-            try {
-                out = await ctx.generateQuietPrompt(prompt, false, false);
-            } catch (e) {
-                log('positional generateQuietPrompt failed', e);
-            }
-        }
-        if (typeof out !== 'string' || !out.trim()) {
+        if (typeof text !== 'string' || !text.trim()) {
             throw new Error('总结生成失败（模型未返回内容）');
         }
-
-        const content = out.trim();
+        const content = text.trim();
         const title = (content.split('\n')[0] || '').trim().slice(0, 24)
             || `摘要 ${store.summaries.length + 1}`;
         store.summaries.push({ title, content, ts: Date.now(), upTo: chat.length - 1 });
         store.lastMessageId = chat.length - 1;
         await saveMetadata();
 
+        // 功能2：自动写入聊天世界书
+        let wiName = '';
+        if (sSync().wiEnabled) {
+            try {
+                wiName = await saveSummaryToWorldInfo(`总结${nextWiCounter()}`, content);
+            } catch (e) {
+                log('worldinfo write failed', e);
+                toast(`⚠️ 世界书写入失败：${e?.message || e}`);
+            }
+        }
+
         renderRecords();
         await updateTokens();
         if (manual) {
-            toast('✅ 记忆总结完成');
+            toast(`✅ 记忆总结完成${via === 'subapi' ? '（副API）' : ''}${wiName ? `，已写入世界书「${wiName}」` : ''}`);
         }
     } catch (e) {
         console.error('[MissSummary] summarize failed', e);
@@ -1097,6 +1179,119 @@ function setBusy(on) {
     $btn.prop('disabled', !!on).toggleClass('disabled', !!on);
 }
 
+// ---------------- 世界书 ----------------
+// 依赖 world-info.js：loadWorldInfo / saveWorldInfo / world_info_position
+// 聊天世界书绑定 = chat_metadata.world_info（METADATA_KEY）
+
+let _wiMod = null;
+async function wiMod() {
+    if (_wiMod) {
+        return _wiMod;
+    }
+    try {
+        _wiMod = await import('../../../world-info.js');
+    } catch (e) {
+        log('world-info.js import failed', e);
+    }
+    return _wiMod;
+}
+
+function nextWiCounter() {
+    const st = sSync();
+    st.wiCounter = Number(st.wiCounter) || 0;
+    st.wiCounter += 1;
+    saveSettings();
+    return st.wiCounter;
+}
+
+/**
+ * 将总结内容写入世界书：
+ * - 世界书名 = 传入的 name（如「总结1」，数字按总结次数递增）
+ * - 条目开蓝灯（constant=true，常驻注入）
+ * - 位置 = atDepth(4)，depth = 999（系统插入深度@D999）
+ * - 自动绑定到当前聊天的「聊天世界书」（chat_metadata.world_info）
+ */
+async function saveSummaryToWorldInfo(name, content) {
+    const wm = await wiMod();
+    if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) {
+        throw new Error('world-info 模块不可用');
+    }
+    const ctx = getContext();
+    // 世界书内容：可能已存在（同名则追加条目）
+    let data = null;
+    try {
+        data = await wm.loadWorldInfo(name);
+    } catch { /* 不存在 */ }
+    if (!data || typeof data !== 'object' || !data.entries) {
+        data = { entries: {} };
+    }
+    // 计算新 uid
+    const uids = Object.keys(data.entries).map(Number).filter(n => Number.isInteger(n));
+    const uid = uids.length ? Math.max(...uids) + 1 : 0;
+    const pos = wm.world_info_position?.atDepth ?? 4;
+    data.entries[uid] = {
+        uid,
+        key: [],
+        keysecondary: [],
+        comment: `Miss总结 ${new Date().toLocaleString()}`,
+        content: String(content || ''),
+        constant: true,        // 蓝灯：常驻
+        selective: true,
+        selectiveLogic: 0,
+        addMemo: true,
+        order: 100,
+        position: pos,         // @D 系统插入深度
+        depth: 999,            // 插入深度 999
+        role: 0,               // system
+        disable: false,
+        excludeRecursion: false,
+        preventRecursion: false,
+        probability: 100,
+        useProbability: true,
+        group: '',
+        groupOverride: false,
+        groupWeight: 100,
+        scanDepth: null,
+        caseSensitive: null,
+        matchWholeWords: null,
+        useGroupScoring: null,
+        automationId: '',
+        sticky: null,
+        cooldown: null,
+        delay: null,
+    };
+    await wm.saveWorldInfo(name, data, true);
+
+    // 绑定为聊天世界书（不是角色世界书、不是全局）
+    try {
+        const ctx2 = getContext();
+        if (ctx2 && typeof ctx2 === 'object') {
+            if (!ctx2.chatMetadata || typeof ctx2.chatMetadata !== 'object') {
+                ctx2.chatMetadata = {};
+            }
+            ctx2.chatMetadata.world_info = name;
+        }
+        const mod = await getSTModule();
+        if (mod?.saveMetadata) {
+            await mod.saveMetadata();
+        }
+        // 刷新世界书下拉与聊天绑定状态
+        try {
+            const es = await getEventSource();
+            const et = await getEventTypes();
+            if (es && et?.WORLDINFO_UPDATED && es.emit) {
+                await es.emit(et.WORLDINFO_UPDATED, name, data);
+            }
+        } catch { /* ignore */ }
+        if (typeof $ === 'function' && window.jQuery) {
+            window.jQuery('.chat_lorebook_button').addClass('world_set');
+        }
+    } catch (e) {
+        log('chat world bind failed', e);
+    }
+    return name;
+}
+
 // ---------------- 编辑摘要 ----------------
 
 async function saveEdit(rec, newText) {
@@ -1115,6 +1310,386 @@ async function saveEdit(rec, newText) {
     renderRecords();
     updateTokens();
     toast('✅ 已保存并覆盖到聊天');
+}
+
+// ---------------- 副API ----------------
+// 走 ST 后端代理：/api/backends/chat-completions/generate + chat_completion_source=custom
+// 密钥通过 /api/secrets/write 写入 api_key_custom，由后端读取
+
+function normalizeSubUrl(url) {
+    let u = String(url || '').trim().replace(/\/+$/, '');
+    if (u && !/^https?:\/\//i.test(u)) {
+        u = `http://${u}`;
+    }
+    return u;
+}
+
+async function writeSecretKey(key) {
+    try {
+        const mod = await getSTModule();
+        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+        const resp = await fetch('/api/secrets/write', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ key: 'api_key_custom', value: String(key || '') }),
+        });
+        return resp.ok;
+    } catch (e) {
+        log('writeSecretKey failed', e);
+        return false;
+    }
+}
+
+async function subApiGenerate(messages, { maxTokens = 800 } = {}) {
+    const st = sSync();
+    const cfg = st.subApi || {};
+    const url = normalizeSubUrl(cfg.url);
+    if (!url) {
+        throw new Error('副API地址为空');
+    }
+    const source = String(cfg.source || 'custom');
+    // 先写入密钥到 ST secrets（CUSTOM 源从后端读取）
+    if (cfg.key) {
+        await writeSecretKey(cfg.key);
+    }
+    const body = {
+        chat_completion_source: source,
+        model: String(cfg.model || 'gpt-4o-mini'),
+        messages,
+        max_tokens: maxTokens,
+        temperature: 0.7,
+        stream: false,
+        custom_url: url,
+        custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
+    };
+    const mod = await getSTModule();
+    const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+    const resp = await fetch('/api/backends/chat-completions/generate', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) {
+        throw new Error(data?.error?.message || data?.response || `HTTP ${resp.status}`);
+    }
+    const text = data?.choices?.[0]?.message?.content
+        ?? data?.choices?.[0]?.text
+        ?? data?.content?.[0]?.text
+        ?? '';
+    const out = String(text || '').trim();
+    if (!out) {
+        throw new Error('副API未返回内容');
+    }
+    return out;
+}
+
+async function subApiTest() {
+    try {
+        const out = await subApiGenerate(
+            [{ role: 'user', content: '请只回复两个字：连接成功' }],
+            { maxTokens: 30 },
+        );
+        return { ok: true, text: out.slice(0, 60) };
+    } catch (e) {
+        return { ok: false, error: e?.message || String(e) };
+    }
+}
+
+async function subApiFetchModels() {
+    try {
+        const st = sSync();
+        const cfg = st.subApi || {};
+        const url = normalizeSubUrl(cfg.url);
+        if (!url) {
+            return { ok: false, error: '副API地址为空' };
+        }
+        const source = String(cfg.source || 'custom');
+        if (cfg.key) {
+            await writeSecretKey(cfg.key);
+        }
+        const mod = await getSTModule();
+        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+        // 复用后端 status 端点拉取模型列表（source=custom 时读 custom_url）
+        const resp = await fetch('/api/backends/chat-completions/status', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                chat_completion_source: source,
+                reverse_proxy: url,
+                proxy_password: cfg.key || '',
+                custom_url: url,
+                custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
+            }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || data.error) {
+            throw new Error(data?.error?.message || `HTTP ${resp.status}`);
+        }
+        const ids = (data?.data || [])
+            .map(m => m?.id || m?.model || m?.name)
+            .filter(Boolean);
+        return { ok: true, models: [...new Set(ids)].sort() };
+    } catch (e) {
+        return { ok: false, error: e?.message || String(e) };
+    }
+}
+
+// 总结时选用的生成通道：副API → 酒馆当前 API
+async function generateSummaryText(prompt) {
+    const st = sSync();
+    if (st.subApi?.url) {
+        try {
+            return { text: await subApiGenerate([{ role: 'user', content: prompt }]), via: 'subapi' };
+        } catch (e) {
+            log('subApi generate failed, fallback to ST API', e);
+            toast(`⚠️ 副API失败（${e?.message || e}），改用酒馆当前API`);
+        }
+    }
+    const ctx = getContext();
+    let out;
+    try {
+        out = await ctx.generateQuietPrompt({ quietPrompt: prompt });
+    } catch (e) {
+        log('object-arg generateQuietPrompt failed', e);
+    }
+    if (typeof out !== 'string' || !out.trim()) {
+        try {
+            out = await ctx.generateQuietPrompt(prompt, false, false);
+        } catch (e) {
+            log('positional generateQuietPrompt failed', e);
+        }
+    }
+    if (typeof out !== 'string' || !out.trim()) {
+        throw new Error('总结生成失败（模型未返回内容）');
+    }
+    return { text: out.trim(), via: 'main' };
+}
+
+// ---------------- 副API UI ----------------
+
+function renderSubApi() {
+    if (!$drawer || !$drawer.length) {
+        return;
+    }
+    const st = sSync();
+    const cfg = st.subApi || {};
+    $('#miss-subapi-type', $drawer).val(cfg.type || 'openai');
+    $('#miss-subapi-source', $drawer).val(cfg.source || 'custom');
+    $('#miss-subapi-url', $drawer).val(cfg.url || '');
+    $('#miss-subapi-key', $drawer).val(cfg.key || '');
+    $('#miss-subapi-model', $drawer).val(cfg.model || '');
+    $('#miss-subapi-source-row', $drawer).toggle(String(cfg.type || 'openai') === 'openai');
+    // 已保存列表
+    const names = Object.keys(st.subApiSaved || {});
+    const $sel = $('#miss-subapi-saved-select', $drawer);
+    $sel.empty().append('<option value="">— 选择已保存的副API —</option>');
+    for (const n of names) {
+        $sel.append($('<option></option>').val(n).text(n));
+    }
+    $sel.val(st.subApiActive && names.includes(st.subApiActive) ? st.subApiActive : '');
+    // 状态行
+    const $status = $('#miss-subapi-status', $drawer);
+    if (cfg.connected) {
+        $status.html(`<span style="color:var(--green,#4caf50);">● 已连接</span> ${escapeHtml(cfg.model || cfg.url || '')}（总结时将使用此副API）`);
+    } else {
+        $status.text('未连接。总结时如已填写副API将使用它生成摘要；未填写则使用酒馆当前连接的API。');
+    }
+}
+
+function readSubApiForm() {
+    const st = sSync();
+    st.subApi = st.subApi || { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false };
+    st.subApi.type = String($('#miss-subapi-type', $drawer).val() || 'openai');
+    st.subApi.source = String($('#miss-subapi-source', $drawer).val() || 'custom');
+    st.subApi.url = normalizeSubUrl($('#miss-subapi-url', $drawer).val());
+    st.subApi.key = String($('#miss-subapi-key', $drawer).val() || '');
+    st.subApi.model = String($('#miss-subapi-model', $drawer).val() || '').trim();
+    return st.subApi;
+}
+
+function bindSubApiUi() {
+    // 折叠条展开/收起
+    $drawer.on('click', '#miss-subapi-toggle', function () {
+        $('#miss-subapi-body', $drawer).slideToggle(150);
+        $(this).find('.miss-collapse-icon').toggleClass('open');
+    });
+    $drawer.on('click', '#miss-subapi-saved-toggle', function () {
+        $('#miss-subapi-saved-body', $drawer).slideToggle(150);
+        $(this).find('.miss-collapse-icon').toggleClass('open');
+    });
+
+    $drawer.on('change', '#miss-subapi-type', function () {
+        readSubApiForm();
+        saveSettings();
+        renderSubApi();
+    });
+    $drawer.on('change', '#miss-subapi-source, #miss-subapi-url, #miss-subapi-key, #miss-subapi-model', function () {
+        readSubApiForm();
+        saveSettings();
+    });
+
+    $drawer.on('click', '#miss-subapi-connect-btn', async function () {
+        const $btn = $(this);
+        $btn.prop('disabled', true);
+        readSubApiForm();
+        const st = sSync();
+        st.subApi.connected = false;
+        saveSettings();
+        renderSubApi();
+        try {
+            const r = await subApiTest();
+            if (r.ok) {
+                sSync().subApi.connected = true;
+                saveSettings();
+                renderSubApi();
+                toast(`✅ 副API连接成功：${r.text}`);
+            } else {
+                renderSubApi();
+                toast(`❌ 连接失败：${r.error}`);
+            }
+        } finally {
+            $btn.prop('disabled', false);
+        }
+    });
+
+    $drawer.on('click', '#miss-subapi-test-btn', async function () {
+        const $btn = $(this);
+        $btn.prop('disabled', true);
+        readSubApiForm();
+        try {
+            const r = await subApiTest();
+            toast(r.ok ? `✅ 测试消息返回：${r.text}` : `❌ 测试失败：${r.error}`);
+            if (r.ok) {
+                sSync().subApi.connected = true;
+                saveSettings();
+                renderSubApi();
+            }
+        } finally {
+            $btn.prop('disabled', false);
+        }
+    });
+
+    $drawer.on('click', '#miss-subapi-models-btn', async function () {
+        const $btn = $(this);
+        $btn.prop('disabled', true);
+        readSubApiForm();
+        try {
+            const r = await subApiFetchModels();
+            if (!r.ok) {
+                toast(`❌ 拉取模型失败：${r.error}`);
+                return;
+            }
+            if (!r.models?.length) {
+                toast('未拉取到模型列表');
+                return;
+            }
+            const $input = $('#miss-subapi-model', $drawer);
+            const current = String($input.val() || '');
+            // 拉取到的模型替换为下拉选择（保留手输能力：双击还原为 input）
+            const $sel = $('<select id="miss-subapi-model" class="miss-input"></select>');
+            for (const m of r.models) {
+                $sel.append($('<option></option>').val(m).text(m));
+            }
+            $sel.val(current && r.models.includes(current) ? current : r.models[0]);
+            $input.replaceWith($sel);
+            readSubApiForm();
+            saveSettings();
+            toast(`✅ 已拉取 ${r.models.length} 个模型`);
+            // 换回文本框：双击下拉框
+            $sel.on('dblclick', () => {
+                const v = String($sel.val() || '');
+                const $inp = $('<input id="miss-subapi-model" class="miss-input" type="text" placeholder="模型名，或点右侧拉取">').val(v);
+                $sel.replaceWith($inp);
+            });
+        } finally {
+            $btn.prop('disabled', false);
+        }
+    });
+
+    // 保存当前副API配置
+    $drawer.on('click', '#miss-subapi-save-btn', async () => {
+        const name = String($('#miss-subapi-save-name', $drawer).val() || '').trim()
+            || autoSubApiName();
+        const st = sSync();
+        st.subApiSaved = st.subApiSaved || {};
+        readSubApiForm();
+        st.subApiSaved[name] = {
+            type: st.subApi.type,
+            source: st.subApi.source,
+            url: st.subApi.url,
+            key: st.subApi.key,
+            model: st.subApi.model,
+            connected: !!st.subApi.connected,
+            savedAt: Date.now(),
+        };
+        st.subApiActive = name;
+        saveSettings();
+        $('#miss-subapi-save-name', $drawer).val('');
+        renderSubApi();
+        toast(`✅ 已保存副API「${name}」并启用`);
+    });
+
+    // 切换副API
+    $drawer.on('change', '#miss-subapi-saved-select', async function () {
+        const name = String($(this).val() || '');
+        if (!name) {
+            return;
+        }
+        await applySubApiSnapshot(name);
+    });
+
+    // 删除所选副API
+    $drawer.on('click', '#miss-subapi-saved-delete', () => {
+        const st = sSync();
+        const name = String($('#miss-subapi-saved-select', $drawer).val() || '');
+        if (!name || !st.subApiSaved?.[name]) {
+            toast('请先在下方选择栏选择一个已保存的副API');
+            return;
+        }
+        delete st.subApiSaved[name];
+        if (st.subApiActive === name) {
+            st.subApiActive = '';
+        }
+        saveSettings();
+        renderSubApi();
+        toast(`已删除副API「${name}」`);
+    });
+}
+
+function autoSubApiName() {
+    const st = sSync();
+    const taken = new Set(Object.keys(st.subApiSaved || {}));
+    for (let i = 1; i <= 10; i++) {
+        if (!taken.has(String(i))) {
+            return String(i);
+        }
+    }
+    let n = 11;
+    while (taken.has(String(n))) {
+        n++;
+    }
+    return String(n);
+}
+
+async function applySubApiSnapshot(name) {
+    const st = sSync();
+    const snap = st.subApiSaved?.[name];
+    if (!snap) {
+        return;
+    }
+    st.subApi = {
+        type: snap.type || 'openai',
+        source: snap.source || 'custom',
+        url: snap.url || '',
+        key: snap.key || '',
+        model: snap.model || '',
+        connected: !!snap.connected,
+    };
+    st.subApiActive = name;
+    saveSettings();
+    renderSubApi();
+    toast(`已切换到副API「${name}」`);
 }
 
 // ---------------- 弹窗 / 提示 ----------------

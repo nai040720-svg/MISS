@@ -509,3 +509,44 @@
 #missSummarySettings:not(#missSummaryModal #missSummarySettings) .inline-drawer-content {
     padding: 10px;
 }
+
+/* ============ 副API折叠条 ============ */
+
+#missSummarySettings .miss-collapse-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    border-radius: var(--borderRadius, 8px);
+    background: transparent;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    user-select: none;
+    transition: border-color 0.15s ease;
+}
+
+#missSummarySettings .miss-collapse-header:hover {
+    border-color: var(--SmartThemeQuoteColor, #a05a2c);
+}
+
+#missSummarySettings .miss-collapse-header b {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+}
+
+#missSummarySettings .miss-collapse-icon {
+    transition: transform 0.15s ease;
+    color: var(--SmartThemeEmColor, #b0b0b8);
+}
+
+#missSummarySettings .miss-collapse-icon.open {
+    transform: rotate(180deg);
+}
+
+#missSummarySettings .miss-collapse-body {
+    padding: 8px 2px 2px;
+}
