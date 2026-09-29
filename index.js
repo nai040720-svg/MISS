@@ -32,12 +32,20 @@ async function extMod() {
     }
 }
 
-function getEventSource() {
-    return window.eventSource || null;
+async function getEventSource() {
+    if (window.eventSource) {
+        return window.eventSource;
+    }
+    const mod = await stMod();
+    return mod?.eventSource || null;
 }
 
-function getEventTypes() {
-    return window.event_types || {
+async function getEventTypes() {
+    if (window.event_types) {
+        return window.event_types;
+    }
+    const mod = await stMod();
+    return mod?.event_types || {
         CHAT_CHANGED: 'CHAT_CHANGED',
         MESSAGE_SENT: 'MESSAGE_SENT',
         MESSAGE_RECEIVED: 'MESSAGE_RECEIVED',
@@ -196,8 +204,8 @@ async function init() {
     log('step 6/6: render');
     renderAll();
 
-    const es = getEventSource();
-    const et = getEventTypes();
+    const es = await getEventSource();
+    const et = await getEventTypes();
     if (es && et) {
         es.on(et.CHAT_CHANGED, onChatChanged);
         es.on(et.MESSAGE_SENT, onMessageChanged);
@@ -741,7 +749,7 @@ async function bindUi() {
         }
     });
 
-    $('#miss-records-list', $drawer).on('click', '[data-act]', function (e) {
+    $('#miss-records-list', $drawer).on('click', '[data-act]', async function (e) {
         e.stopPropagation();
         const act = $(this).data('act');
         const $rec = $(this).closest('.miss-record');
