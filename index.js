@@ -172,12 +172,7 @@ function defaultSettings() {
         tokenThreshold: 0,
         floorThreshold: 0,
         keepVisibleFloors: 0,
-        summaryPrompt: '你是总结助手。请将以下聊天内容整理为一份详细的第三人称记忆摘要，要求：\n'
-            + '1. 按时间顺序记录所有关键事件、对话要点\n'
-            + '2. 保留所有人物的名字、关系变化、重要约定与承诺\n'
-            + '3. 记录情绪转折、伏笔与未解决的冲突\n'
-            + '4. 内容完整详实，篇幅依聊天内容多少而定，不要偷懒省略\n'
-            + '5. 直接输出摘要正文，不要任何解释或开场白\n\n',
+        summaryPrompt: '',  // 提示词完全由用户在「提示词」分类填写，插件不内置
         jailbreakPrompt: '',
         autoSummarize: true,
         autoHideFloors: false,  // 功能4：总结过的楼层自动隐藏
@@ -202,11 +197,6 @@ async function s() {
             if (es[MODULE][key] === undefined) {
                 es[MODULE][key] = defaultSettings()[key];
             }
-        }
-        // 迁移：旧版默认提示词导致总结过短，自动升级为详细版（用户自定义过则不动）
-        const OLD_PROMPT = '请将以下聊天内容浓缩为一段简洁的第三人称记忆摘要，保留关键事件、人物关系与重要约定：\n\n';
-        if (es[MODULE].summaryPrompt === OLD_PROMPT) {
-            es[MODULE].summaryPrompt = defaultSettings().summaryPrompt;
         }
         _settings = es[MODULE];
     }
@@ -1186,8 +1176,9 @@ async function reSummarizeAll() {
     const prevPreset = currentPresetName();
     try {
         const st = sSync();
+        // 不加任何内部指令，只发送旧摘要内容本身（提示词由用户在提示词分类规定）
         const combined = oldTexts.join('\n\n');
-        const chatText = `以下是之前多次总结出的记忆摘要，请把它们重新整合为一份更精炼、按时间线组织的完整摘要：\n\n${combined}`;
+        const chatText = combined;
 
         let text, via;
         try {
@@ -1355,7 +1346,8 @@ async function onGeneration() {
         const sep = await getSetExtensionPrompt();
         const texts = injectEnabled ? getStore().summaries.map(x => x.content).filter(Boolean) : [];
         if (texts.length) {
-            const injection = '[以下是更早剧情的记忆摘要]\n' + texts.join('\n---\n');
+            // 直接注入摘要正文（不加插件内置的前缀/说明，遵守提示词只由用户规定）
+            const injection = texts.join('\n---\n');
             sep(MODULE, injection, pt.IN_CHAT, 4, false, pr.SYSTEM);
         } else {
             sep(MODULE, '', pt.NONE, 0);
@@ -1479,8 +1471,9 @@ async function runSummary(manual) {
 
         // chatText = 所有抓取记录的【完整内容】（r.content 是标签内全部文本，
         // 不是标题；标题仅用于记录列表显示）
+        // 只发送抓取的原文内容本身，不加任何插件内置的标注/说明
         const chatText = allRecords
-            .map(r => `【${r.tag} · 第${r.floor}楼 · 以下为该楼摘要标签内的全部原文】\n${r.content}`)
+            .map(r => r.content)
             .join('\n\n');
         // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
@@ -1977,12 +1970,15 @@ async function subApiFetchModels() {
 function buildSummaryMessages(chatText) {
     const st = sSync();
     const msgs = [];
+    // 提示词完全由用户填写：填了才发，插件不内置任何内容
     const jb = String(st.jailbreakPrompt || '').trim();
-    const sp = String(st.summaryPrompt || defaultSettings().summaryPrompt).trim();
+    const sp = String(st.summaryPrompt || '').trim();
     if (jb) {
         msgs.push({ role: 'system', content: jb });
     }
-    msgs.push({ role: 'system', content: sp });
+    if (sp) {
+        msgs.push({ role: 'system', content: sp });
+    }
     msgs.push({ role: 'user', content: chatText });
     return msgs;
 }
@@ -2000,9 +1996,9 @@ async function generateSummaryText(chatText) {
             toast(`⚠️ 副API失败（${e?.message || e}），改用酒馆当前API`, 'warning');
         }
     }
-    // 主 API：把消息数组串成 quiet prompt（system 部分前置）
+    // 主 API：用户填写的 system 提示词前置（未填写则只有 chatText 本身）
     const systemPart = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
-    const prompt = `${systemPart}\n\n${chatText}`;
+    const prompt = systemPart ? `${systemPart}\n\n${chatText}` : chatText;
     const ctx = getContext();
     let out;
     try {
