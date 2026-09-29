@@ -685,7 +685,7 @@ async function bindUi() {
         await saveSnapshot(name);
     });
 
-    $('#miss-saved-select', $drawer).on('change', function () {
+    $('#miss-saved-select', $drawer).on('change', async function () {
         const name = String($(this).val() || '');
         if (name) {
             await applySnapshot(name);
@@ -770,7 +770,7 @@ async function bindUi() {
     });
 }
 
-function onChatChanged() {
+async function onChatChanged() {
     recordsOpen.clear();
     editingId = null;
     try {
@@ -788,7 +788,7 @@ function onMessageChanged() {
     debouncedAuto();
 }
 
-function onGeneration() {
+async function onGeneration() {
     const keep = Number(sSync().keepVisibleFloors) || 0;
     const ctx = getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
