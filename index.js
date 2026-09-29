@@ -164,8 +164,12 @@ let lastTokenCount = 0;
 let busy = false;
 const recordsOpen = new Set();
 let editingId = null;
+let $drawer = null;
+
+console.log('[MissSummary] module evaluated');
 
 jQuery(() => {
+    log('jQuery ready fired');
     init().catch(err => {
         console.error('[MissSummary] init failed', err);
         // 加载失败自动重试（应对 ST 各版本模块加载时序差异）
@@ -176,13 +180,20 @@ jQuery(() => {
 async function init() {
     const ctx = getContext();
     if (!ctx) {
+        log('context not ready, skip');
         return;
     }
+    log('step 1/6: settings');
     await s();
+    log('step 2/6: drawer');
     buildDrawer();
+    log('step 3/6: menu button');
     addMenuButton();
-    bindUi();
+    log('step 4/6: bind ui');
+    await bindUi();
+    log('step 5/6: presets');
     await refreshPresets();
+    log('step 6/6: render');
     renderAll();
 
     const es = getEventSource();
@@ -352,8 +363,15 @@ function openPanel() {
 
 function getStore() {
     const ctx = getContext();
-    if (!ctx.chatMetadata) {
-        ctx.chatMetadata = {};
+    if (!ctx) {
+        return { summaries: [], lastMessageId: -1 };
+    }
+    if (!ctx.chatMetadata || typeof ctx.chatMetadata !== 'object') {
+        try {
+            ctx.chatMetadata = {};
+        } catch {
+            return { summaries: [], lastMessageId: -1 };
+        }
     }
     if (!ctx.chatMetadata[MODULE]) {
         ctx.chatMetadata[MODULE] = { summaries: [], lastMessageId: -1 };
@@ -412,7 +430,7 @@ async function getSTModule() {
         return _stModule;
     }
     try {
-        _stModule = await import('../../../../script.js');
+        _stModule = await stMod();
         return _stModule;
     } catch (e) {
         log('script.js dynamic import failed', e);
