@@ -1251,6 +1251,16 @@ function onMessageChanged() {
     debouncedAuto();
 }
 
+// 同步隐藏状态到聊天 DOM（与 ST /hide 行为一致，幽灵图标 .mes_ghost 随 is_system 属性显示）
+function markMessageHiddenDom(messageId, hidden) {
+    try {
+        const block = window.jQuery(`.mes[mesid="${messageId}"]`);
+        if (block.length) {
+            block.attr('is_system', String(hidden));
+        }
+    } catch { /* ignore */ }
+}
+
 async function onGeneration() {
     const st = sSync();
     const keep = Number(st.keepVisibleFloors) || 0;
@@ -1282,6 +1292,7 @@ async function onGeneration() {
             const m = chat[i];
             if (m && !m.is_system) {
                 m.is_system = true;
+                markMessageHiddenDom(i, true);
                 changed = true;
             }
         }
@@ -1310,6 +1321,7 @@ async function onGeneration() {
             const m = chat[i];
             if (m && !m.is_system) {
                 m.is_system = true;
+                markMessageHiddenDom(i, true);
                 changed = true;
             }
         }
