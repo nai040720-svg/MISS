@@ -23,6 +23,20 @@ async function stMod() {
     return _stMod;
 }
 
+// ST Popup API：定位/主题/手机适配全部由 ST 官方弹窗系统管理
+let _popupMod = null;
+async function popupMod() {
+    if (_popupMod) {
+        return _popupMod;
+    }
+    try {
+        _popupMod = await import('../../../popup.js');
+    } catch (e) {
+        log('popup.js import failed', e);
+    }
+    return _popupMod;
+}
+
 async function extMod() {
     try {
         return await import('../../../extensions.js');
@@ -343,7 +357,7 @@ function addMenuButton(attempt = 0) {
     log('menu button injected into extensionsMenu (wand)');
 }
 
-function openPanel() {
+async function openPanel() {
     // 收起魔法棒菜单：点击会冒泡到 ST 全局监听自动关闭，
     // 这里补一次按钮点击确保 isDropdownVisible 内部状态同步，防止菜单残留
     const $menu = $('#extensionsMenu');
@@ -360,7 +374,32 @@ function openPanel() {
         return;
     }
 
-    // 弹窗模式：把扩展面板内容搬进独立弹窗显示，关闭时搬回原位
+    // 使用 ST 官方 Popup 承载面板：定位/缩放/主题/手机适配全部由 ST 管理，
+    // 彻底避免 movingUI/transform 导致的 fixed 定位错位问题
+    const pm = await popupMod();
+    if (pm?.callGenericPopup && pm?.POPUP_TYPE?.TEXT) {
+        // 面板搬进弹窗内容区（事件绑定在 $drawer 委托上，搬动不影响）
+        const result = await pm.callGenericPopup($(block), pm.POPUP_TYPE.TEXT, '', {
+            wide: true,
+            large: true,
+            allowVerticalScrolling: true,
+            okButton: '关闭',
+            onClosing: () => {
+                // 关闭后面板搬回扩展设置区，保持扩展面板里也始终可用
+                const host = document.getElementById('extensions_settings2')
+                    || document.getElementById('extensions_settings');
+                if (block && host && !host.contains(block)) {
+                    host.insertAdjacentElement('afterbegin', block);
+                }
+                return true;
+            },
+        });
+        renderAll();
+        updateTokens();
+        return result;
+    }
+
+    // 兜底：ST Popup 不可用时使用自绘弹窗
     let $modal = $('#missSummaryModal');
     if (!$modal.length) {
         $('body').append(`
@@ -439,6 +478,27 @@ function getStore() {
     return st;
 }
 
+// 智能提取标签名：容忍用户粘贴完整标签 <tag>...</tag>、属性、尖括号、空格
+function cleanTagName(raw) {
+    let t = String(raw ?? '').trim();
+    if (!t) {
+        return '';
+    }
+    // 收集所有标签结构中的标识符：<tag> </tag> <tag attr> 等
+    const names = [];
+    const re = /<\/?\s*([A-Za-z_][\w.-]*)\s*[^>]*>/g;
+    const rest = t.replace(re, (full, name) => {
+        names.push(name);
+        return ' ';
+    });
+    const cleaned = rest.replace(/[<>/]/g, ' ').trim();
+    if (names.length) {
+        return names[0];
+    }
+    const m = cleaned.match(/^([A-Za-z_][\w.-]*)/);
+    return m ? m[1] : '';
+}
+
 function extractRecords() {
     const ctx = getContext();
     const tag = String(sSync().tag || '').trim();
@@ -502,8 +562,7 @@ async function getSTModule() {
 
 function renderAll() {
     const st = sSync();
-    $('#miss-tag-input', $drawer).val(st.tag);
-    $('#miss-preset-select', $drawer).val(st.boundPreset);
+    $('#miss-tag-input', $drawer).val(st.tag);    $('#miss-preset-select', $drawer).val(st.boundPreset);
     $('#miss-token-threshold', $drawer).val(st.tokenThreshold || '');
     $('#miss-floor-threshold', $drawer).val(st.floorThreshold || '');
     $('#miss-keep-floors', $drawer).val(st.keepVisibleFloors || '');
@@ -787,7 +846,9 @@ async function bindUi() {
     });
 
     $('#miss-tag-input', $drawer).on('change', function () {
-        sSync().tag = String($(this).val() || '').trim();
+        sSync().tag = cleanTagName($(this).val());
+        // 输入框回显规范化后的标签名
+        $(this).val(sSync().tag);
         saveSettings();
         recordsOpen.clear();
         editingId = null;
@@ -795,14 +856,19 @@ async function bindUi() {
     });
 
     $('#miss-extract-btn', $drawer).on('click', () => {
-        // 先把输入框当前值同步到设置（用户可能没触发 change 就点抓取）
-        sSync().tag = String($('#miss-tag-input', $drawer).val() || '').trim();
+        // 先把输入框当前值清洗同步到设置（用户可能没触发 change 就点抓取）
+        sSync().tag = cleanTagName($('#miss-tag-input', $drawer).val());
+        $('#miss-tag-input', $drawer).val(sSync().tag);
         saveSettings();
+        if (!sSync().tag) {
+            toast('❌ 摘要标签为空，请先填写标签名（如 summary 或 <summary>）');
+            return;
+        }
         recordsOpen.clear();
         editingId = null;
         renderRecords();
         const n = extractRecords().length;
-        toast(n ? `✅ 已抓取 ${n} 条「${sSync().tag}」摘要` : `未抓取到匹配「${sSync().tag || '(标签为空)'}」的摘要内容`);
+        toast(n ? `✅ 已抓取 ${n} 条「${sSync().tag}」摘要` : `未抓取到 <${sSync().tag}>...</${sSync().tag}> 包裹的内容`);
     });
 
     $('#miss-preset-select', $drawer).on('change', function () {
@@ -1104,7 +1170,7 @@ async function applySnapshot(name) {
     if (!snap) {
         return;
     }
-    st.tag = snap.tag || '';
+    st.tag = cleanTagName(snap.tag || '');
     st.boundPreset = snap.boundPreset || '';
     st.tokenThreshold = Number(snap.tokenThreshold) || 0;
     st.floorThreshold = Number(snap.floorThreshold) || 0;
