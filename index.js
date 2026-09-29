@@ -212,6 +212,7 @@ async function init() {
         es.on(et.MESSAGE_RECEIVED, onMessageChanged);
         es.on(et.GENERATION_AFTER_COMMANDS, onGeneration);
         es.on(et.SETTINGS_UPDATED, refreshPresets);
+        await hookTokenEvents();
     } else {
         log('event source not available, event hooks disabled');
     }
@@ -343,10 +344,15 @@ function addMenuButton(attempt = 0) {
 }
 
 function openPanel() {
-    // 关闭魔法棒弹出菜单
+    // 收起魔法棒菜单：点击会冒泡到 ST 全局监听自动关闭，
+    // 这里补一次按钮点击确保 isDropdownVisible 内部状态同步，防止菜单残留
+    const $menu = $('#extensionsMenu');
+    const $wandBtn = $('#extensionsMenuButton');
+    if ($menu.is(':visible') && Number($menu.css('opacity')) > 0.9) {
+        $wandBtn.trigger('click');
+    }
+    // 旧版抽屉式菜单兜底
     $('#extensionsMenuPopout').parent().removeClass('openDrawer');
-    $('#extensionsMenu').hide();
-    setTimeout(() => $('#extensionsMenu').show(), 300);
 
     const block = document.getElementById('missSummarySettings');
     if (!block) {
@@ -439,7 +445,8 @@ function extractRecords() {
     if (!tag || !Array.isArray(ctx.chat)) {
         return [];
     }
-    const re = new RegExp(`<${escapeReg(tag)}>([\\s\\S]*?)</${escapeReg(tag)}>`, 'g');
+    // 大小写不敏感 + 容忍属性/空白：<tag ...>...</tag>
+    const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
     const records = [];
     ctx.chat.forEach((m, idx) => {
         if (!m || typeof m.mes !== 'string') {
@@ -449,7 +456,10 @@ function extractRecords() {
         const parts = [];
         let mm;
         while ((mm = re.exec(m.mes)) !== null) {
-            parts.push(mm[1].trim());
+            const t = String(mm[1] || '').trim();
+            if (t) {
+                parts.push(t);
+            }
         }
         if (!parts.length) {
             return;
@@ -550,36 +560,107 @@ function renderRecords() {
     $list.html(html);
 }
 
+// ---- 精确 Token 统计：监听 ST 生成前的最终 prompt 事件 ----
+// CHAT_COMPLETION_PROMPT_READY: chat API 最终消息数组（含全部预设/角色卡/聊天/注入）
+// GENERATE_AFTER_COMBINE_PROMPTS: 文本补全 API 最终合并后的字符串
+let _lastPromptTokens = 0;
+let _tokenCountFn = null;
+
+async function hookTokenEvents() {
+    const es = await getEventSource();
+    const et = await getEventTypes();
+    if (!es || !et) {
+        return;
+    }
+    if (et.CHAT_COMPLETION_PROMPT_READY) {
+        es.on(et.CHAT_COMPLETION_PROMPT_READY, onPromptReady);
+    }
+    if (et.GENERATE_AFTER_COMBINE_PROMPTS) {
+        es.on(et.GENERATE_AFTER_COMBINE_PROMPTS, onPromptReady);
+    }
+}
+
+async function onPromptReady(data) {
+    try {
+        let text = '';
+        if (Array.isArray(data?.chat)) {
+            // chat completion：拼接全部 role 消息（这就是发给 AI 的完整内容）
+            text = data.chat
+                .map(m => (typeof m === 'string' ? m : `${m?.role ? m.role + ': ' : ''}${m?.content || ''}`))
+                .join('\n');
+        } else if (typeof data?.prompt === 'string') {
+            text = data.prompt;
+        } else {
+            return;
+        }
+        const n = await countTokens(text);
+        if (n > 0) {
+            _lastPromptTokens = n;
+            paintTokenDisplay(n);
+        }
+    } catch (e) {
+        log('onPromptReady failed', e);
+    }
+}
+
+async function countTokens(text) {
+    if (!text) {
+        return 0;
+    }
+    const ctx = getContext();
+    if (typeof ctx?.getTokenCountAsync === 'function') {
+        try { return await ctx.getTokenCountAsync(text); } catch { /* fallthrough */ }
+    }
+    if (typeof ctx?.getTokenCount === 'function') {
+        try { return ctx.getTokenCount(text); } catch { /* fallthrough */ }
+    }
+    return Math.ceil(text.length / 3.5); // 近似兜底（英文≈4字符/token）
+}
+
+function paintTokenDisplay(n) {
+    lastTokenCount = Number(n) || 0;
+    const $el = $('#miss-token-display', $drawer);
+    if ($el.length) {
+        $el.text(String(lastTokenCount));
+    }
+}
+
 async function updateTokens() {
+    if (!$drawer || !$drawer.length) {
+        return lastTokenCount;
+    }
+    // 优先展示最近一次真实生成的精确值
+    if (_lastPromptTokens > 0) {
+        paintTokenDisplay(_lastPromptTokens);
+        return lastTokenCount;
+    }
+    // 无生成记录时：用与 ST 相同口径估算（系统提示 + 角色卡描述/场景/Personality + 作者注 + 世界书 + 全部楼层 + 注入）
     const ctx = getContext();
     let text = '';
     try {
-        // 预设提示词 token：从脚本上下文防御性获取，避免版本差异
-        const mod = await getSTModule();
-        const oai = mod?.oai_settings;
-        if (oai?.prompts) {
-            text += JSON.stringify(oai.prompts) + '\n';
+        const ch = ctx.characters?.[ctx.characterId];
+        if (ch) {
+            text += `${ch.description || ''}\n${ch.personality || ''}\n${ch.scenario || ''}\n${ch.first_mes || ''}\n${ch.mes || ''}\n`;
         }
+    } catch { /* ignore */ }
+    try { text += `${ctx.name1 || ''}\n${ctx.name2 || ''}\n`; } catch { /* ignore */ }
+    try {
+        text += `${ctx.chatMetadata?.note_prompt || ''}\n`;
     } catch { /* ignore */ }
     try {
         text += (ctx.chat || [])
-            .map(m => `${m?.is_user ? '用户' : '角色'}: ${m?.mes || ''}`)
+            .map(m => `${m?.is_user ? (ctx.name1 || '用户') : (ctx.name2 || '角色')}: ${m?.mes || ''}`)
             .join('\n') + '\n';
-        text += getStore().summaries.map(x => x.content).join('\n');
+    } catch { /* ignore */ }
+    try {
+        const sum = getStore().summaries.map(x => x.content).join('\n');
+        if (sum) {
+            text += sum + '\n';
+        }
     } catch { /* ignore */ }
 
-    let n = null;
-    if (typeof ctx.getTokenCountAsync === 'function') {
-        try { n = await ctx.getTokenCountAsync(text); } catch { /* ignore */ }
-    }
-    if (n == null && typeof ctx.getTokenCount === 'function') {
-        try { n = ctx.getTokenCount(text); } catch { /* ignore */ }
-    }
-    if (n == null) {
-        n = Math.ceil(text.length / 2.2);
-    }
-    lastTokenCount = Number(n) || 0;
-    $('#miss-token-display', $drawer).text(String(lastTokenCount));
+    const n = await countTokens(text);
+    paintTokenDisplay(n);
     return lastTokenCount;
 }
 
@@ -714,11 +795,14 @@ async function bindUi() {
     });
 
     $('#miss-extract-btn', $drawer).on('click', () => {
+        // 先把输入框当前值同步到设置（用户可能没触发 change 就点抓取）
+        sSync().tag = String($('#miss-tag-input', $drawer).val() || '').trim();
+        saveSettings();
         recordsOpen.clear();
         editingId = null;
         renderRecords();
         const n = extractRecords().length;
-        toast(n ? `✅ 已抓取 ${n} 条「${sSync().tag}」摘要` : '未抓取到匹配的摘要内容');
+        toast(n ? `✅ 已抓取 ${n} 条「${sSync().tag}」摘要` : `未抓取到匹配「${sSync().tag || '(标签为空)'}」的摘要内容`);
     });
 
     $('#miss-preset-select', $drawer).on('change', function () {

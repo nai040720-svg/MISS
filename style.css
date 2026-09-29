@@ -27,7 +27,10 @@
     flex-direction: column;
     width: min(720px, 92vw);
     max-width: 92vw;
-    max-height: min(85vh, 85dvh);
+    /* 关键修复：flex 子元素滚动需要 min-height:0，否则内容溢出不可滚动 */
+    height: min(88vh, 88dvh);
+    max-height: min(88vh, 88dvh);
+    min-height: 0;
     background: var(--SmartThemeBlurTintColor, #2b2b35);
     border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
     border-radius: var(--borderRadius, 12px);
@@ -73,6 +76,7 @@
 
 #missSummaryModal .miss-modal-body {
     flex: 1 1 auto;
+    min-height: 0; /* 允许收缩，否则 flex 布局下 overflow 失效 */
     overflow-y: auto;
     padding: 14px 16px;
 }
@@ -133,6 +137,15 @@
 }
 
 /* ============ 内部组件（沿用主题变量） ============ */
+
+/* 面板切换：仅显示激活的分类（初始设置 / 记忆总结 互斥） */
+#missSummarySettings .miss-panel {
+    display: none;
+}
+
+#missSummarySettings .miss-panel.active {
+    display: block;
+}
 
 /* 导航 */
 #missSummarySettings .miss-nav {
