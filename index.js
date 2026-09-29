@@ -1,23 +1,128 @@
 // Miss总结插件 - SillyTavern Extension
-import {
-    extension_settings,
-    getContext,
-    saveSettingsDebounced,
-} from '../../../extensions.js';
-import {
-    saveMetadataDebounced,
-    eventSource,
-    event_types,
-    setExtensionPrompt,
-    extension_prompt_types,
-    extension_prompt_roles,
-} from '../../../../script.js';
+// 兼容性策略：只静态导入 getContext（所有版本必有），其余全部运行时防御性获取
+import { getContext } from '../../../extensions.js';
 
 const MODULE = 'missSummary';
 
 const $ = window.jQuery;
 
 const log = (...args) => console.log('[MissSummary]', ...args);
+
+// ---- 运行时依赖获取（全部带兜底，避免版本差异导致模块崩溃）----
+
+let _stMod = null;
+async function stMod() {
+    if (_stMod) {
+        return _stMod;
+    }
+    try {
+        _stMod = await import('../../../../script.js');
+    } catch (e) {
+        log('script.js import failed', e);
+    }
+    return _stMod;
+}
+
+async function extMod() {
+    try {
+        return await import('../../../extensions.js');
+    } catch (e) {
+        log('extensions.js import failed', e);
+        return null;
+    }
+}
+
+function getEventSource() {
+    return window.eventSource || null;
+}
+
+function getEventTypes() {
+    return window.event_types || {
+        CHAT_CHANGED: 'CHAT_CHANGED',
+        MESSAGE_SENT: 'MESSAGE_SENT',
+        MESSAGE_RECEIVED: 'MESSAGE_RECEIVED',
+        GENERATION_AFTER_COMMANDS: 'GENERATION_AFTER_COMMANDS',
+        SETTINGS_UPDATED: 'SETTINGS_UPDATED',
+    };
+}
+
+async function getExtSettings() {
+    const ctx = getContext();
+    if (ctx?.extensionSettings) {
+        return ctx.extensionSettings;
+    }
+    const em = await extMod();
+    if (em?.extension_settings) {
+        return em.extension_settings;
+    }
+    // 最终兜底：挂在 ST 全局 settings 对象上
+    const st = await stMod();
+    if (st?.extension_settings) {
+        return st.extension_settings;
+    }
+    return (window.extension_settings = window.extension_settings || {});
+}
+
+async function getSaveSettingsFn() {
+    const em = await extMod();
+    return em?.saveSettingsDebounced || (() => {
+        const st = window.saveSettingsDebounced;
+        if (typeof st === 'function') {
+            st();
+        }
+    });
+}
+
+async function getSaveMetadataFn() {
+    const ctx = getContext();
+    if (typeof ctx?.saveMetadata === 'function') {
+        return ctx.saveMetadata;
+    }
+    const mod = await stMod();
+    if (mod?.saveMetadataDebounced) {
+        return mod.saveMetadataDebounced;
+    }
+    if (window.saveMetadataDebounced) {
+        return window.saveMetadataDebounced;
+    }
+    return () => { };
+}
+
+async function getSetExtensionPrompt() {
+    const ctx = getContext();
+    if (typeof ctx?.setExtensionPrompt === 'function') {
+        return ctx.setExtensionPrompt;
+    }
+    const mod = await stMod();
+    return mod?.setExtensionPrompt || (() => { });
+}
+
+function getPromptTypes() {
+    return window.extension_prompt_types || { NONE: 0, IN_PROMPT: 1, IN_CHAT: 2 };
+}
+
+function getPromptRoles() {
+    return window.extension_prompt_roles || { SYSTEM: 'system', USER: 'user', ASSISTANT: 'assistant' };
+}
+// ---- 本地保存包装 ----
+async function saveSettings() {
+    try {
+        const fn = await getSaveSettingsFn();
+        fn();
+    } catch (e) {
+        log('saveSettings failed', e);
+    }
+}
+
+async function saveMetadata() {
+    try {
+        const fn = await getSaveMetadataFn();
+        fn();
+    } catch (e) {
+        log('saveMetadata failed', e);
+    }
+}
+
 
 function defaultSettings() {
     return {
@@ -33,16 +138,26 @@ function defaultSettings() {
     };
 }
 
-function s() {
-    if (extension_settings[MODULE] === undefined) {
-        extension_settings[MODULE] = defaultSettings();
-    }
-    for (const key of Object.keys(defaultSettings())) {
-        if (extension_settings[MODULE][key] === undefined) {
-            extension_settings[MODULE][key] = defaultSettings()[key];
+let _settings = null;
+async function s() {
+    if (!_settings) {
+        const es = await getExtSettings();
+        if (es[MODULE] === undefined) {
+            es[MODULE] = defaultSettings();
         }
+        for (const key of Object.keys(defaultSettings())) {
+            if (es[MODULE][key] === undefined) {
+                es[MODULE][key] = defaultSettings()[key];
+            }
+        }
+        _settings = es[MODULE];
     }
-    return extension_settings[MODULE];
+    return _settings;
+}
+
+function sSync() {
+    // 设置初始化后可同步访问
+    return _settings || defaultSettings();
 }
 
 let lastTokenCount = 0;
@@ -63,18 +178,24 @@ async function init() {
     if (!ctx) {
         return;
     }
-    s();
+    await s();
     buildDrawer();
     addMenuButton();
     bindUi();
     await refreshPresets();
     renderAll();
 
-    eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
-    eventSource.on(event_types.MESSAGE_SENT, onMessageChanged);
-    eventSource.on(event_types.MESSAGE_RECEIVED, onMessageChanged);
-    eventSource.on(event_types.GENERATION_AFTER_COMMANDS, onGeneration);
-    eventSource.on(event_types.SETTINGS_UPDATED, refreshPresets);
+    const es = getEventSource();
+    const et = getEventTypes();
+    if (es && et) {
+        es.on(et.CHAT_CHANGED, onChatChanged);
+        es.on(et.MESSAGE_SENT, onMessageChanged);
+        es.on(et.MESSAGE_RECEIVED, onMessageChanged);
+        es.on(et.GENERATION_AFTER_COMMANDS, onGeneration);
+        es.on(et.SETTINGS_UPDATED, refreshPresets);
+    } else {
+        log('event source not available, event hooks disabled');
+    }
 
     log('loaded, version 0.1.0');
 }
@@ -246,7 +367,7 @@ function getStore() {
 
 function extractRecords() {
     const ctx = getContext();
-    const tag = String(s().tag || '').trim();
+    const tag = String(sSync().tag || '').trim();
     if (!tag || !Array.isArray(ctx.chat)) {
         return [];
     }
@@ -302,7 +423,7 @@ async function getSTModule() {
 // ---------------- 渲染 ----------------
 
 function renderAll() {
-    const st = s();
+    const st = sSync();
     $('#miss-tag-input', $drawer).val(st.tag);
     $('#miss-preset-select', $drawer).val(st.boundPreset);
     $('#miss-token-threshold', $drawer).val(st.tokenThreshold || '');
@@ -316,7 +437,7 @@ function renderAll() {
 }
 
 function renderSavedSelect() {
-    const st = s();
+    const st = sSync();
     const names = Object.keys(st.savedPresets || {});
     const $sel = $('#miss-saved-select', $drawer);
     $sel.empty().append('<option value="">— 选择已保存的设置 —</option>');
@@ -400,7 +521,7 @@ function refreshPresets() {
         return;
     }
     const presets = collectPresets();
-    const current = s().boundPreset;
+    const current = sSync().boundPreset;
     $sel.empty().append('<option value="">不绑定（默认）</option>');
     for (const p of presets) {
         $sel.append($('<option></option>').val(p.value).text(p.text));
@@ -507,7 +628,7 @@ function currentPresetName() {
 
 // ---------------- 事件 ----------------
 
-function bindUi() {
+async function bindUi() {
     $drawer.on('click', '.miss-nav-btn', function () {
         const tab = $(this).data('tab');
         $('.miss-nav-btn', $drawer).removeClass('active');
@@ -517,8 +638,8 @@ function bindUi() {
     });
 
     $('#miss-tag-input', $drawer).on('change', function () {
-        s().tag = String($(this).val() || '').trim();
-        saveSettingsDebounced();
+        sSync().tag = String($(this).val() || '').trim();
+        saveSettings();
         recordsOpen.clear();
         editingId = null;
         renderRecords();
@@ -529,13 +650,13 @@ function bindUi() {
         editingId = null;
         renderRecords();
         const n = extractRecords().length;
-        toast(n ? `✅ 已抓取 ${n} 条「${s().tag}」摘要` : '未抓取到匹配的摘要内容');
+        toast(n ? `✅ 已抓取 ${n} 条「${sSync().tag}」摘要` : '未抓取到匹配的摘要内容');
     });
 
     $('#miss-preset-select', $drawer).on('change', function () {
-        s().boundPreset = String($(this).val() || '');
-        saveSettingsDebounced();
-        toast(s().boundPreset ? `已绑定预设：${s().boundPreset}` : '已取消预设绑定');
+        sSync().boundPreset = String($(this).val() || '');
+        saveSettings();
+        toast(sSync().boundPreset ? `已绑定预设：${sSync().boundPreset}` : '已取消预设绑定');
     });
 
     $('#miss-save-btn', $drawer).on('click', async () => {
@@ -543,18 +664,18 @@ function bindUi() {
         if (!name) {
             return;
         }
-        saveSnapshot(name);
+        await saveSnapshot(name);
     });
 
     $('#miss-saved-select', $drawer).on('change', function () {
         const name = String($(this).val() || '');
         if (name) {
-            applySnapshot(name);
+            await applySnapshot(name);
         }
     });
 
     $('#miss-saved-delete', $drawer).on('click', () => {
-        const st = s();
+        const st = sSync();
         const name = st.savedActive;
         if (!name || !st.savedPresets[name]) {
             toast('请先选择一个已保存的设置');
@@ -562,30 +683,30 @@ function bindUi() {
         }
         delete st.savedPresets[name];
         st.savedActive = '';
-        saveSettingsDebounced();
+        saveSettings();
         renderSavedSelect();
         toast(`已删除「${name}」`);
     });
 
     $('#miss-token-threshold', $drawer).on('change', function () {
-        s().tokenThreshold = Math.max(0, Number($(this).val()) || 0);
-        saveSettingsDebounced();
+        sSync().tokenThreshold = Math.max(0, Number($(this).val()) || 0);
+        saveSettings();
     });
     $('#miss-floor-threshold', $drawer).on('change', function () {
-        s().floorThreshold = Math.max(0, Number($(this).val()) || 0);
-        saveSettingsDebounced();
+        sSync().floorThreshold = Math.max(0, Number($(this).val()) || 0);
+        saveSettings();
     });
     $('#miss-keep-floors', $drawer).on('change', function () {
-        s().keepVisibleFloors = Math.max(0, Number($(this).val()) || 0);
-        saveSettingsDebounced();
+        sSync().keepVisibleFloors = Math.max(0, Number($(this).val()) || 0);
+        saveSettings();
     });
     $('#miss-summary-prompt', $drawer).on('change', function () {
-        s().summaryPrompt = String($(this).val() || '');
-        saveSettingsDebounced();
+        sSync().summaryPrompt = String($(this).val() || '');
+        saveSettings();
     });
     $('#miss-auto-chk', $drawer).on('change', function () {
-        s().autoSummarize = $(this).prop('checked');
-        saveSettingsDebounced();
+        sSync().autoSummarize = $(this).prop('checked');
+        saveSettings();
     });
 
     $('#miss-summarize-btn', $drawer).on('click', () => runSummary(true));
@@ -626,7 +747,7 @@ function bindUi() {
                 toast('内容不能为空');
                 return;
             }
-            saveEdit(rec, newText);
+            await saveEdit(rec, newText);
         }
     });
 }
@@ -635,7 +756,8 @@ function onChatChanged() {
     recordsOpen.clear();
     editingId = null;
     try {
-        setExtensionPrompt(MODULE, '', extension_prompt_types.NONE, 0);
+        const sep = await getSetExtensionPrompt();
+        sep(MODULE, '', getPromptTypes().NONE, 0);
     } catch { /* ignore */ }
     renderAll();
 }
@@ -649,7 +771,7 @@ function onMessageChanged() {
 }
 
 function onGeneration() {
-    const keep = Number(s().keepVisibleFloors) || 0;
+    const keep = Number(sSync().keepVisibleFloors) || 0;
     const ctx = getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
 
@@ -672,9 +794,11 @@ function onGeneration() {
         const texts = getStore().summaries.map(x => x.content).filter(Boolean);
         if (texts.length) {
             const injection = '[以下是更早剧情的记忆摘要]\n' + texts.join('\n---\n');
-            setExtensionPrompt(MODULE, injection, extension_prompt_types.IN_CHAT, 4, false, extension_prompt_roles.SYSTEM);
+            const sep = await getSetExtensionPrompt();
+            sep(MODULE, injection, getPromptTypes().IN_CHAT, 4, false, getPromptRoles().SYSTEM);
         } else {
-            setExtensionPrompt(MODULE, '', extension_prompt_types.NONE, 0);
+            const sep = await getSetExtensionPrompt();
+        sep(MODULE, '', getPromptTypes().NONE, 0);
         }
     } catch (e) {
         log('inject failed', e);
@@ -684,7 +808,7 @@ function onGeneration() {
 // ---------------- 总结 ----------------
 
 async function checkAuto() {
-    const st = s();
+    const st = sSync();
     if (!st.autoSummarize || busy) {
         return;
     }
@@ -726,7 +850,7 @@ async function runSummary(manual) {
     setBusy(true);
     const prevPreset = currentPresetName();
     try {
-        const st = s();
+        const st = sSync();
         const store = getStore();
         const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
         const msgs = chat.slice(lastId + 1).filter(m => m && !m.is_system && typeof m.mes === 'string');
@@ -772,7 +896,7 @@ async function runSummary(manual) {
             || `摘要 ${store.summaries.length + 1}`;
         store.summaries.push({ title, content, ts: Date.now(), upTo: chat.length - 1 });
         store.lastMessageId = chat.length - 1;
-        saveMetadataDebounced();
+        await saveMetadata();
 
         renderRecords();
         await updateTokens();
@@ -792,7 +916,7 @@ async function runSummary(manual) {
 }
 
 function st_b() {
-    return Boolean(s().boundPreset);
+    return Boolean(sSync().boundPreset);
 }
 
 function setBusy(on) {
@@ -803,8 +927,8 @@ function setBusy(on) {
 
 // ---------------- 保存的设置 ----------------
 
-function saveSnapshot(name) {
-    const st = s();
+async function saveSnapshot(name) {
+    const st = sSync();
     st.savedPresets = st.savedPresets || {};
     st.savedPresets[name] = {
         tag: st.tag,
@@ -817,13 +941,13 @@ function saveSnapshot(name) {
         savedAt: Date.now(),
     };
     st.savedActive = name;
-    saveSettingsDebounced();
+    saveSettings();
     renderSavedSelect();
     toast(`✅ 已保存「${name}」`);
 }
 
-function applySnapshot(name) {
-    const st = s();
+async function applySnapshot(name) {
+    const st = sSync();
     const snap = st.savedPresets?.[name];
     if (!snap) {
         return;
@@ -836,7 +960,7 @@ function applySnapshot(name) {
     st.summaryPrompt = snap.summaryPrompt || defaultSettings().summaryPrompt;
     st.autoSummarize = snap.autoSummarize !== false;
     st.savedActive = name;
-    saveSettingsDebounced();
+    saveSettings();
     recordsOpen.clear();
     editingId = null;
     refreshPresets();
@@ -846,7 +970,7 @@ function applySnapshot(name) {
 
 // ---------------- 编辑摘要 ----------------
 
-function saveEdit(rec, newText) {
+async function saveEdit(rec, newText) {
     const ctx = getContext();
     if (rec.type === 'extract') {
         const m = ctx.chat?.[rec.msgId];
@@ -856,7 +980,7 @@ function saveEdit(rec, newText) {
         }
     } else if (rec.entry) {
         rec.entry.content = newText;
-        saveMetadataDebounced();
+        await saveMetadata();
     }
     editingId = null;
     renderRecords();
