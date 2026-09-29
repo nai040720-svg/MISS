@@ -1187,8 +1187,15 @@ async function reSummarizeAll() {
         const title = (content.split('\n')[0] || '').trim().slice(0, 24)
             || `重总摘要 ${summaries.length + 1}`;
 
-        // 生成新的合并摘要（保留旧摘要，追加新条目；覆盖范围到当前最新楼层）
-        store.summaries.push({ title, content, ts: Date.now(), upTo: chat.length - 1, resummarized: true });
+        // 生成新的合并摘要（保留旧摘要，追加新条目；不推进总结点，
+        // upTo 取旧摘要最大值——重总只是整合，不吞掉未总结的新楼层）
+        let maxOldUpTo = -1;
+        for (const s of summaries) {
+            if (typeof s.upTo === 'number' && s.upTo > maxOldUpTo) {
+                maxOldUpTo = s.upTo;
+            }
+        }
+        store.summaries.push({ title, content, ts: Date.now(), upTo: maxOldUpTo, resummarized: true });
         await saveMetadata();
 
         // 写入世界书
@@ -1366,19 +1373,52 @@ async function runSummary(manual) {
         const st = sSync();
         const store = getStore();
         const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
-        const msgs = chat.slice(lastId + 1).filter(m => m && !m.is_system && typeof m.mes === 'string');
 
-        if (!msgs.length) {
+        // user 内容 = 摘要标签抓取的内容（上次总结点之后的楼层，不含隐藏楼层）
+        // 隐藏楼层：自动隐藏模式下最新摘要 upTo 之后的不可总结部分跳过；
+        // 自定义隐藏楼层 N = 最近 N 个角色楼层保留，更早的楼层不参与总结
+        let allRecords = extractRecords();
+        // 过滤隐藏楼层：自动隐藏 → 只总结最新摘要 upTo 之后；自定义 N → 只总结保留区（最近N个角色楼）之前的部分
+        if (st.autoHideFloors) {
+            let maxUpTo = -1;
+            for (const s of store.summaries) {
+                if (typeof s.upTo === 'number' && s.upTo > maxUpTo) {
+                    maxUpTo = s.upTo;
+                }
+            }
+            allRecords = allRecords.filter(r => r.msgId > maxUpTo);
+        } else {
+            const keep = Number(st.keepVisibleFloors) || 0;
+            if (keep > 0 && chat.length > keep) {
+                // 保留区起点 = 最近第 N 个角色楼层的索引；更早楼层不参与总结
+                let counted = 0;
+                let beforeIdx = chat.length;
+                for (let i = chat.length - 1; i >= 0 && counted < keep; i--) {
+                    const m = chat[i];
+                    if (m && !m.is_user && !m.is_system) {
+                        counted++;
+                        beforeIdx = i;
+                    }
+                }
+                allRecords = allRecords.filter(r => r.msgId >= beforeIdx);
+            }
+        }
+        // 只取上次总结点之后的新抓取
+        allRecords = allRecords.filter(r => r.msgId > lastId);
+
+        if (!allRecords.length) {
             if (manual) {
-                toast('没有新的楼层需要总结', 'info');
+                toast('没有新的摘要内容需要总结', 'info');
             }
             return;
         }
+        // 本次实际总结覆盖到的最后一楼（用于下次总结起点与隐藏范围）
+        const lastSummarizedFloor = Math.max(...allRecords.map(r => r.msgId));
 
-        const chatText = msgs
-            .map(m => `${m.is_user ? '用户' : '角色'}: ${m.mes}`)
-            .join('\n');
-        // chatText 仅含聊天内容；提示词结构由 buildSummaryMessages 构造
+        const chatText = allRecords
+            .map(r => `[${r.tag} · 楼层 ${r.floor}]\n${r.content}`)
+            .join('\n\n');
+        // chatText 仅含抓取的摘要内容；提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
 
         if (st.boundPreset) {
@@ -1401,8 +1441,8 @@ async function runSummary(manual) {
         const content = text.trim();
         const title = (content.split('\n')[0] || '').trim().slice(0, 24)
             || `摘要 ${store.summaries.length + 1}`;
-        store.summaries.push({ title, content, ts: Date.now(), upTo: chat.length - 1 });
-        store.lastMessageId = chat.length - 1;
+        store.summaries.push({ title, content, ts: Date.now(), upTo: lastSummarizedFloor });
+        store.lastMessageId = lastSummarizedFloor;
         await saveMetadata();
 
         // 功能2：自动写入聊天世界书
