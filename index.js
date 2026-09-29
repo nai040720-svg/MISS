@@ -343,28 +343,70 @@ function addMenuButton(attempt = 0) {
 }
 
 function openPanel() {
-    // 关闭魔法棒菜单
+    // 关闭魔法棒弹出菜单
     $('#extensionsMenuPopout').parent().removeClass('openDrawer');
-    $('.drawer-toggle .fa-wand-magic-sparkles, #leftNavDrawerIcon .fa-wand-magic-sparkles')
-        .closest('.drawer-toggle').removeClass('openIcon');
+    $('#extensionsMenu').hide();
+    setTimeout(() => $('#extensionsMenu').show(), 300);
 
     const block = document.getElementById('missSummarySettings');
     if (!block) {
         toast('插件面板未就绪，请稍候重试');
         return;
     }
-    // 打开扩展抽屉
-    const drawerContent = block.closest('.drawer-content');
-    const drawer = drawerContent ? drawerContent.closest('.drawer') : null;
-    if (drawer && !drawer.classList.contains('openDrawer')) {
-        const toggle = drawer.querySelector('.drawer-toggle');
-        if (toggle) {
-            toggle.click();
-        }
+
+    // 弹窗模式：把扩展面板内容搬进独立弹窗显示，关闭时搬回原位
+    let $modal = $('#missSummaryModal');
+    if (!$modal.length) {
+        $('body').append(`
+            <div id="missSummaryModal" class="miss-modal-overlay">
+                <div class="miss-modal-window">
+                    <div class="miss-modal-header">
+                        <div class="miss-modal-title"><i class="fa-solid fa-brain"></i> Miss总结</div>
+                        <button id="miss-modal-close" class="miss-modal-close" title="关闭"><i class="fa-solid fa-xmark"></i></button>
+                    </div>
+                    <div class="miss-modal-body"></div>
+                </div>
+            </div>`);
+        $modal = $('#missSummaryModal');
+        // 关闭：X 按钮 / 点击遮罩空白 / ESC
+        $modal.on('click', '#miss-modal-close', closePanel);
+        $modal.on('click', e => {
+            if (e.target === $modal[0]) {
+                closePanel();
+            }
+        });
+        $(document).on('keydown.missModal', e => {
+            if (e.key === 'Escape' && $modal.hasClass('visible')) {
+                closePanel();
+            }
+        });
     }
-    setTimeout(() => {
-        block.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 350);
+
+    const $body = $modal.find('.miss-modal-body');
+    if (!$body.find(block).length) {
+        // 首次打开：搬入面板（事件绑定在 $drawer 委托上，搬动不影响）
+        $body.append(block);
+    }
+    $modal.addClass('visible').css('display', 'flex').hide().fadeIn(180);
+    renderAll();
+    updateTokens();
+}
+
+function closePanel() {
+    const $modal = $('#missSummaryModal');
+    if (!$modal.length) {
+        return;
+    }
+    $modal.removeClass('visible').fadeOut(150, () => {
+        // 把面板搬回扩展设置区，保持扩展面板里也始终可用
+        const block = document.getElementById('missSummarySettings');
+        const host = document.getElementById('extensions_settings2')
+            || document.getElementById('extensions_settings');
+        if (block && host && !host.contains(block)) {
+            host.insertAdjacentElement('afterbegin', block);
+        }
+        $modal.css('display', '');
+    });
 }
 
 // ---------------- 数据 ----------------
