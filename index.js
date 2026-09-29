@@ -155,8 +155,6 @@ function defaultSettings() {
         keepVisibleFloors: 0,
         summaryPrompt: '请将以下聊天内容浓缩为一段简洁的第三人称记忆摘要，保留关键事件、人物关系与重要约定：\n\n',
         autoSummarize: true,
-        savedPresets: {},
-        savedActive: '',
     };
 }
 
@@ -262,20 +260,7 @@ function buildDrawer() {
                         <select id="miss-preset-select" class="miss-input">
                             <option value="">不绑定（默认）</option>
                         </select>
-                        <div class="miss-hint">选择一个预设，总结时将临时使用该预设生成，完成后自动恢复原预设。</div>
-                    </div>
-
-                    <div class="miss-field">
-                        <label><i class="fa-solid fa-floppy-disk"></i> 保存初始设置</label>
-                        <div class="miss-inline-row">
-                            <input id="miss-save-name" class="miss-input" type="text" placeholder="为本次设置起一个名字">
-                            <button id="miss-save-btn" class="miss-btn primary"><i class="fa-solid fa-check"></i> 保存</button>
-                        </div>
-                        <div class="miss-inline-row" style="margin-top:6px;">
-                            <select id="miss-saved-select" class="miss-input"></select>
-                            <button id="miss-saved-delete" class="miss-btn" title="删除所选"><i class="fa-solid fa-trash"></i></button>
-                        </div>
-                        <div class="miss-hint">保存多个配置后，可在此选择栏切换，插件会立即跳转到对应设置。</div>
+                        <div class="miss-hint">选择一个预设并绑定摘要标签，切换预设即可使用对应的摘要标签抓取，无需手动保存。</div>
                     </div>
                 </div>
 
@@ -309,7 +294,9 @@ function buildDrawer() {
                         </div>
                         <label for="miss-summary-prompt" style="margin-top:8px;">总结提示词</label>
                         <textarea id="miss-summary-prompt" class="miss-input" rows="3"></textarea>
-                        <label class="miss-check"><input id="miss-auto-chk" type="checkbox"> 自动总结（达到阈值时触发）</label>
+                        <label class="miss-check" title="勾选后：当新楼层满「楼层总结」楼，或总 Token 满「Token 总结」时，插件自动调用 AI 总结一次，无需手动点按钮">
+                            <input id="miss-auto-chk" type="checkbox"> 自动总结（达到上方阈值时插件自动触发，不勾选则只能手动点「立即总结」）
+                        </label>
                         <div class="miss-inline-row" style="margin-top:6px;">
                             <button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button>
                         </div>
@@ -576,20 +563,8 @@ function renderAll() {
     $('#miss-keep-floors', $drawer).val(st.keepVisibleFloors || '');
     $('#miss-summary-prompt', $drawer).val(st.summaryPrompt || '');
     $('#miss-auto-chk', $drawer).prop('checked', !!st.autoSummarize);
-    renderSavedSelect();
     renderRecords();
     updateTokens();
-}
-
-function renderSavedSelect() {
-    const st = sSync();
-    const names = Object.keys(st.savedPresets || {});
-    const $sel = $('#miss-saved-select', $drawer);
-    $sel.empty().append('<option value="">— 选择已保存的设置 —</option>');
-    for (const name of names) {
-        $sel.append($('<option></option>').val(name).text(name));
-    }
-    $sel.val(st.savedActive && names.includes(st.savedActive) ? st.savedActive : '');
 }
 
 function renderRecords() {
@@ -885,54 +860,6 @@ async function bindUi() {
         toast(sSync().boundPreset ? `已绑定预设：${sSync().boundPreset}` : '已取消预设绑定');
     });
 
-    $('#miss-save-btn', $drawer).on('click', async () => {
-        // 直接保存：用输入框里的名字；未填则自动分配数字名（1~10 循环，重名自动顺延）
-        let name = String($('#miss-save-name', $drawer).val() || '').trim();
-        const st = sSync();
-        st.savedPresets = st.savedPresets || {};
-        if (!name) {
-            const taken = new Set(Object.keys(st.savedPresets));
-            for (let i = 1; i <= 10; i++) {
-                if (!taken.has(String(i))) {
-                    name = String(i);
-                    break;
-                }
-            }
-            if (!name) {
-                // 1~10 全占用则寻找更大的可用数字
-                let n = 11;
-                while (taken.has(String(n))) {
-                    n++;
-                }
-                name = String(n);
-            }
-            $('#miss-save-name', $drawer).val(name);
-        }
-        $('#miss-save-name', $drawer).val('');
-        await saveSnapshot(name);
-    });
-
-    $('#miss-saved-select', $drawer).on('change', async function () {
-        const name = String($(this).val() || '');
-        if (name) {
-            await applySnapshot(name);
-        }
-    });
-
-    $('#miss-saved-delete', $drawer).on('click', () => {
-        const st = sSync();
-        const name = st.savedActive;
-        if (!name || !st.savedPresets[name]) {
-            toast('请先选择一个已保存的设置');
-            return;
-        }
-        delete st.savedPresets[name];
-        st.savedActive = '';
-        saveSettings();
-        renderSavedSelect();
-        toast(`已删除「${name}」`);
-    });
-
     $('#miss-token-threshold', $drawer).on('change', function () {
         sSync().tokenThreshold = Math.max(0, Number($(this).val()) || 0);
         saveSettings();
@@ -1168,49 +1095,6 @@ function setBusy(on) {
     $('#miss-status-dot', $drawer).toggleClass('busy', !!on);
     const $btn = $('#miss-summarize-btn', $drawer);
     $btn.prop('disabled', !!on).toggleClass('disabled', !!on);
-}
-
-// ---------------- 保存的设置 ----------------
-
-async function saveSnapshot(name) {
-    const st = sSync();
-    st.savedPresets = st.savedPresets || {};
-    st.savedPresets[name] = {
-        tag: st.tag,
-        boundPreset: st.boundPreset,
-        tokenThreshold: st.tokenThreshold,
-        floorThreshold: st.floorThreshold,
-        keepVisibleFloors: st.keepVisibleFloors,
-        summaryPrompt: st.summaryPrompt,
-        autoSummarize: st.autoSummarize,
-        savedAt: Date.now(),
-    };
-    st.savedActive = name;
-    saveSettings();
-    renderSavedSelect();
-    toast(`✅ 已保存「${name}」`);
-}
-
-async function applySnapshot(name) {
-    const st = sSync();
-    const snap = st.savedPresets?.[name];
-    if (!snap) {
-        return;
-    }
-    st.tag = cleanTagList(snap.tag || '');
-    st.boundPreset = snap.boundPreset || '';
-    st.tokenThreshold = Number(snap.tokenThreshold) || 0;
-    st.floorThreshold = Number(snap.floorThreshold) || 0;
-    st.keepVisibleFloors = Number(snap.keepVisibleFloors) || 0;
-    st.summaryPrompt = snap.summaryPrompt || defaultSettings().summaryPrompt;
-    st.autoSummarize = snap.autoSummarize !== false;
-    st.savedActive = name;
-    saveSettings();
-    recordsOpen.clear();
-    editingId = null;
-    refreshPresets();
-    renderAll();
-    toast(`已切换到「${name}」`);
 }
 
 // ---------------- 编辑摘要 ----------------
