@@ -8,7 +8,6 @@ import {
     saveMetadataDebounced,
     eventSource,
     event_types,
-    oai_settings,
     setExtensionPrompt,
     extension_prompt_types,
     extension_prompt_roles,
@@ -52,7 +51,11 @@ const recordsOpen = new Set();
 let editingId = null;
 
 jQuery(() => {
-    init().catch(err => console.error('[MissSummary] init failed', err));
+    init().catch(err => {
+        console.error('[MissSummary] init failed', err);
+        // 加载失败自动重试（应对 ST 各版本模块加载时序差异）
+        setTimeout(() => init().catch(e => console.error('[MissSummary] retry failed', e)), 1500);
+    });
 });
 
 async function init() {
@@ -64,7 +67,7 @@ async function init() {
     buildDrawer();
     addMenuButton();
     bindUi();
-    refreshPresets();
+    await refreshPresets();
     renderAll();
 
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
@@ -81,8 +84,7 @@ async function init() {
 function buildDrawer() {
     if (document.getElementById('missSummarySettings')) {
         return;
-    }
-    const html = `
+    }    const html = `
     <div id="missSummarySettings" class="extension_settings">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
@@ -177,37 +179,52 @@ function buildDrawer() {
     $drawer = $('#missSummarySettings');
 }
 
-function addMenuButton() {
+function addMenuButton(attempt = 0) {
     if (document.getElementById('miss-menu-item')) {
         return;
     }
+    // 魔法棒菜单 = #extensionsMenu（聊天框左侧 wand 图标弹出的扩展菜单）
     const menu = document.getElementById('extensionsMenu');
     if (!menu) {
+        if (attempt < 20) {
+            setTimeout(() => addMenuButton(attempt + 1), 500);
+        } else {
+            console.error('[MissSummary] extensionsMenu not found after retries');
+        }
         return;
     }
     menu.insertAdjacentHTML('afterbegin', `
-        <div id="miss-menu-item" class="list-group-item flex-container flexGap5" title="Miss总结插件">
+        <div id="miss-menu-item" class="list-group-item flex-container flexGap5 interactable" title="Miss总结插件">
             <div class="fa-fw fa-solid fa-brain extensionsMenuExtensionButton"></div>
-            <span>Miss总结插件</span>
+            <span>Miss总结</span>
         </div>`);
     $('#miss-menu-item').on('click', openPanel);
+    log('menu button injected into extensionsMenu (wand)');
 }
 
 function openPanel() {
+    // 关闭魔法棒菜单
+    $('#extensionsMenuPopout').parent().removeClass('openDrawer');
+    $('.drawer-toggle .fa-wand-magic-sparkles, #leftNavDrawerIcon .fa-wand-magic-sparkles')
+        .closest('.drawer-toggle').removeClass('openIcon');
+
     const block = document.getElementById('missSummarySettings');
-    if (block) {
-        const drawerContent = block.closest('.drawer-content');
-        const drawer = drawerContent ? drawerContent.closest('.drawer') : null;
-        if (drawer && !drawer.classList.contains('openDrawer')) {
-            const toggle = drawer.querySelector('.drawer-toggle');
-            if (toggle) {
-                toggle.click();
-            }
-        }
-        setTimeout(() => {
-            block.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }, 350);
+    if (!block) {
+        toast('插件面板未就绪，请稍候重试');
+        return;
     }
+    // 打开扩展抽屉
+    const drawerContent = block.closest('.drawer-content');
+    const drawer = drawerContent ? drawerContent.closest('.drawer') : null;
+    if (drawer && !drawer.classList.contains('openDrawer')) {
+        const toggle = drawer.querySelector('.drawer-toggle');
+        if (toggle) {
+            toggle.click();
+        }
+    }
+    setTimeout(() => {
+        block.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 350);
 }
 
 // ---------------- 数据 ----------------
@@ -266,6 +283,20 @@ function allRecords() {
         floor: (typeof it.upTo === 'number' ? it.upTo : -1) + 1,
     }));
     return [...extractRecords(), ...summaryRecords];
+}
+
+let _stModule = null;
+async function getSTModule() {
+    if (_stModule) {
+        return _stModule;
+    }
+    try {
+        _stModule = await import('../../../../script.js');
+        return _stModule;
+    } catch (e) {
+        log('script.js dynamic import failed', e);
+        return null;
+    }
 }
 
 // ---------------- 渲染 ----------------
@@ -334,7 +365,12 @@ async function updateTokens() {
     const ctx = getContext();
     let text = '';
     try {
-        text += JSON.stringify(oai_settings?.prompts || {}) + '\n';
+        // 预设提示词 token：从脚本上下文防御性获取，避免版本差异
+        const mod = await getSTModule();
+        const oai = mod?.oai_settings;
+        if (oai?.prompts) {
+            text += JSON.stringify(oai.prompts) + '\n';
+        }
     } catch { /* ignore */ }
     try {
         text += (ctx.chat || [])
@@ -375,14 +411,32 @@ function refreshPresets() {
 function collectPresets() {
     const out = [];
     const seen = new Set();
-    $('#settings_preset_openai option, #settings_preset option').each(function () {
-        const value = String($(this).val() || '').trim();
-        const text = String($(this).text() || '').trim();
-        if (value && !seen.has(value)) {
-            seen.add(value);
-            out.push({ value, text: text || value });
-        }
+    // ST 版本差异：预设下拉可能在主设置或弹窗中，遍历所有已知选择器
+    const selectors = '#settings_preset_openai, #settings_preset, [id^="settings_preset_openai"]';
+    $(selectors).each(function () {
+        $(this).find('option').each(function () {
+            const value = String($(this).val() || '').trim();
+            const text = String($(this).text() || '').trim();
+            if (value && !seen.has(value)) {
+                seen.add(value);
+                out.push({ value, text: text || value });
+            }
+        });
     });
+    // 兜底：通过文件系统预设列表（openai 预设目录）
+    if (!out.length) {
+        try {
+            const ctx = getContext();
+            const names = ctx.getChatCompletionPresets?.() || [];
+            for (const n of names) {
+                const name = typeof n === 'string' ? n : n?.name;
+                if (name && !seen.has(name)) {
+                    seen.add(name);
+                    out.push({ value: name, text: name });
+                }
+            }
+        } catch { /* ignore */ }
+    }
     return out;
 }
 
@@ -419,6 +473,16 @@ async function applyPreset(name) {
             return true;
         }
     }
+    // 兜底：直接设置 API 预设名并保存
+    try {
+        const ctx = getContext();
+        const mod = await getSTModule();
+        if (mod?.oai_settings && typeof mod?.saveSettingsDebounced === 'function') {
+            mod.oai_settings.preset_settings_openai = name;
+            mod.saveSettingsDebounced();
+            return true;
+        }
+    } catch { /* ignore */ }
     return false;
 }
 
@@ -429,6 +493,15 @@ function currentPresetName() {
             return String($sel.find('option:selected').text() || $sel.val());
         }
     }
+    // 兜底：预设管理器
+    try {
+        const ctx = getContext();
+        const pm = ctx.getPresetManager?.('openai');
+        const name = pm?.getSelectedPresetName?.() || pm?.selected?.name;
+        if (name) {
+            return String(name);
+        }
+    } catch { /* ignore */ }
     return null;
 }
 
