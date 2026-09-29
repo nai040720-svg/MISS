@@ -157,7 +157,8 @@ async function saveSettings() {
 async function saveMetadata() {
     try {
         const fn = await getSaveMetadataFn();
-        fn();
+        // await 确保聊天元数据（含世界书绑定）真正落盘后再继续
+        await fn();
     } catch (e) {
         log('saveMetadata failed', e);
     }
@@ -1399,6 +1400,21 @@ async function runSummary(manual) {
             toast('❌ 当前没有可总结的聊天记录', 'error');
         }
         return;
+    }
+
+    const stPre = sSync();
+    const hasSubApi = stPre.subApi?.url && normalizeSubUrl(stPre.subApi.url);
+    // 副API 与 主API 都不可用 → 提前明确告知（不默默失败）
+    if (!hasSubApi && !window.__missApiChecked) {
+        // 主API连接状态从 ST 全局读取（online_status !== 'no_connection'）
+        try {
+            const mod = await getSTModule();
+            const online = String(mod?.online_status || '');
+            if (online === 'no_connection') {
+                toast('❌ 未连接任何API（副API未填写，主API未连接），无法总结。请先在副API设置中连接，或连接酒馆主API。', 'error');
+                return;
+            }
+        } catch { /* 无法判断时不拦截 */ }
     }
 
     busy = true;
