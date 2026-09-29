@@ -155,9 +155,10 @@ function defaultSettings() {
         keepVisibleFloors: 0,
         summaryPrompt: '请将以下聊天内容浓缩为一段简洁的第三人称记忆摘要，保留关键事件、人物关系与重要约定：\n\n',
         autoSummarize: true,
+        autoHideFloors: false,  // 功能4：总结过的楼层自动隐藏
         // 副API设置
-        subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false },
-        subApiSaved: {},   // { name: {type, source, url, key, model} }
+        subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false },
+        subApiSaved: {},   // { name: {type, source, url, key, model, stream} }
         subApiActive: '',  // 当前启用的副API配置名（''=用上面手动填写的）
         // 世界书
         wiEnabled: true,
@@ -319,6 +320,9 @@ function buildDrawer() {
                                 <button id="miss-subapi-connect-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-plug-circle-check"></i> 连接</button>
                                 <button id="miss-subapi-test-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-paper-plane"></i> 发送测试消息</button>
                             </div>
+                            <label class="miss-check" title="仅对插件总结生效：开启后副API以流式(SSE)方式返回总结内容；不影响酒馆主聊天的流式设置">
+                                <input id="miss-subapi-stream-chk" type="checkbox"> 总结时开启 AI 流式传输（仅对插件总结生效）
+                            </label>
                             <div id="miss-subapi-status" class="miss-hint" style="margin-top:6px;">未连接。总结时如绑定了副API将使用此 API 生成摘要；未绑定则使用酒馆当前连接的 API。</div>
 
                             <div class="miss-field" style="margin-top:12px;">
@@ -344,9 +348,25 @@ function buildDrawer() {
 
                 <div class="miss-panel" id="miss-panel-memory">
                     <div class="miss-field">
-                        <label><i class="fa-solid fa-scroll"></i> 记录</label>
+                        <label><i class="fa-solid fa-scroll"></i> 记录（标签抓取）</label>
                         <div class="miss-records-scroll">
                             <div id="miss-records-list"></div>
+                        </div>
+                    </div>
+
+                    <div class="miss-field">
+                        <div class="miss-collapse-header interactable" id="miss-summaries-toggle" tabindex="0">
+                            <b><i class="fa-solid fa-brain"></i> 已总结摘要（<span id="miss-summaries-count">0</span>）</b>
+                            <i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i>
+                        </div>
+                        <div class="miss-collapse-body" id="miss-summaries-body" style="display:none;">
+                            <div class="miss-records-scroll">
+                                <div id="miss-summaries-list"></div>
+                            </div>
+                            <div class="miss-inline-row" style="margin-top:6px;">
+                                <button id="miss-resummarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-rotate-right"></i> 重新总结</button>
+                            </div>
+                            <div class="miss-hint">点击「重新总结」将把之前所有已总结的摘要重新交给 AI 总结一遍，生成一条新的合并摘要。</div>
                         </div>
                     </div>
 
@@ -374,6 +394,9 @@ function buildDrawer() {
                         <textarea id="miss-summary-prompt" class="miss-input" rows="3"></textarea>
                         <label class="miss-check" title="勾选后：当新楼层满「楼层总结」楼，或总 Token 满「Token 总结」时，插件自动调用 AI 总结一次，无需手动点按钮">
                             <input id="miss-auto-chk" type="checkbox"> 自动总结（达到上方阈值时插件自动触发，不勾选则只能手动点「立即总结」）
+                        </label>
+                        <label class="miss-check" title="勾选后：已被总结覆盖的楼层（≤最新摘要的 upTo 楼）自动标记为隐藏，发送给 AI 的提示词中将不再包含这些楼层的聊天记录，仅注入摘要内容">
+                            <input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏楼层（总结过的楼层不再发给 AI，只注入摘要）
                         </label>
                         <div class="miss-inline-row" style="margin-top:6px;">
                             <button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button>
@@ -437,6 +460,10 @@ async function openPanel() {
     const pm = await popupMod();
     if (pm?.callGenericPopup && pm?.POPUP_TYPE?.TEXT) {
         // 面板搬进弹窗内容区（事件绑定在 $drawer 委托上，搬动不影响）
+        // 注意：callGenericPopup 会 await 到关闭才 resolve，
+        // 所以必须在调用前完成渲染
+        renderAll();
+        updateTokens();
         const result = await pm.callGenericPopup($(block), pm.POPUP_TYPE.TEXT, '', {
             wide: true,
             large: true,
@@ -452,8 +479,6 @@ async function openPanel() {
                 return true;
             },
         });
-        renderAll();
-        updateTokens();
         return result;
     }
 
@@ -605,8 +630,13 @@ function extractRecords() {
 }
 
 function allRecords() {
+    // 「记录」区仅显示标签抓取的内容（已总结摘要单独在折叠栏显示）
+    return extractRecords();
+}
+
+function summaryRecords() {
     const store = getStore();
-    const summaryRecords = store.summaries.map((it, i) => ({
+    return store.summaries.map((it, i) => ({
         id: `s${i}`,
         type: 'summary',
         title: it.title,
@@ -614,7 +644,6 @@ function allRecords() {
         entry: it,
         floor: (typeof it.upTo === 'number' ? it.upTo : -1) + 1,
     }));
-    return [...extractRecords(), ...summaryRecords];
 }
 
 let _stModule = null;
@@ -641,7 +670,9 @@ function renderAll() {
     $('#miss-keep-floors', $drawer).val(st.keepVisibleFloors || '');
     $('#miss-summary-prompt', $drawer).val(st.summaryPrompt || '');
     $('#miss-auto-chk', $drawer).prop('checked', !!st.autoSummarize);
+    $('#miss-hide-floors-chk', $drawer).prop('checked', !!st.autoHideFloors);
     renderRecords();
+    renderSummaries();
     updateTokens();
 }
 
@@ -673,6 +704,45 @@ function renderRecords() {
             <div class="miss-record-header">
                 <span class="miss-record-title">${escapeHtml(r.title)}</span>
                 <span class="miss-record-badge">${badge}</span>
+            </div>
+            <div class="miss-record-body">${body}</div>
+        </div>`;
+    }).join('');
+    $list.html(html);
+}
+
+// 渲染「已总结摘要」折叠栏
+function renderSummaries() {
+    const $list = $('#miss-summaries-list', $drawer);
+    const $count = $('#miss-summaries-count', $drawer);
+    if (!$list.length) {
+        return;
+    }
+    const recs = summaryRecords();
+    if ($count.length) {
+        $count.text(String(recs.length));
+    }
+    if (!recs.length) {
+        $list.html('<div class="miss-hint" style="padding:8px 4px;">暂无已总结摘要 — 点击「立即总结」或等待自动总结。</div>');
+        return;
+    }
+    const html = recs.map(r => {
+        const open = recordsOpen.has(r.id) ? ' open' : '';
+        const isEditing = editingId === r.id;
+        const body = isEditing
+            ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(r.content)}</textarea>
+               <div class="miss-record-editbar">
+                   <button class="miss-btn" data-act="cancel-edit">取消</button>
+                   <button class="miss-btn primary" data-act="save-edit"><i class="fa-solid fa-check"></i> 保存修改</button>
+               </div>`
+            : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div>
+               <div class="miss-record-editbar">
+                   <button class="miss-btn" data-act="start-edit"><i class="fa-solid fa-pen"></i> 编辑模式</button>
+               </div>`;
+        return `<div class="miss-record${open}" data-id="${r.id}">
+            <div class="miss-record-header">
+                <span class="miss-record-title">${escapeHtml(r.title)}</span>
+                <span class="miss-record-badge">总结到 ${r.floor} 楼</span>
             </div>
             <div class="miss-record-body">${body}</div>
         </div>`;
@@ -961,10 +1031,24 @@ async function bindUi() {
         sSync().autoSummarize = $(this).prop('checked');
         saveSettings();
     });
+    $('#miss-hide-floors-chk', $drawer).on('change', function () {
+        sSync().autoHideFloors = $(this).prop('checked');
+        saveSettings();
+        toast(sSync().autoHideFloors
+            ? '✅ 自动隐藏已开启：总结过的楼层将不再发送给 AI'
+            : '自动隐藏已关闭', 'info');
+    });
 
     $('#miss-summarize-btn', $drawer).on('click', () => runSummary(true));
 
-    $('#miss-records-list', $drawer).on('click', '.miss-record-header', function () {
+    // 已总结摘要折叠栏：展开/收起
+    $drawer.on('click', '#miss-summaries-toggle', function () {
+        $('#miss-summaries-body', $drawer).slideToggle(150);
+        $(this).find('.miss-collapse-icon').toggleClass('open');
+    });
+
+    // 两个列表共用交互（记录 + 已总结摘要）：展开收起
+    $('#miss-records-list, #miss-summaries-list', $drawer).on('click', '.miss-record-header', function () {
         const id = $(this).closest('.miss-record').data('id');
         const $rec = $(this).closest('.miss-record');
         if (recordsOpen.has(id)) {
@@ -976,12 +1060,16 @@ async function bindUi() {
         }
     });
 
-    $('#miss-records-list', $drawer).on('click', '[data-act]', async function (e) {
+    // 编辑操作：按所在列表查找记录来源
+    $('#miss-records-list, #miss-summaries-list', $drawer).on('click', '[data-act]', async function (e) {
         e.stopPropagation();
         const act = $(this).data('act');
         const $rec = $(this).closest('.miss-record');
         const id = $rec.data('id');
-        const rec = allRecords().find(r => r.id === id);
+        const $scope = $(this).closest('#miss-records-list').length ? 'records' : 'summaries';
+        const rec = $scope === 'summaries'
+            ? summaryRecords().find(r => r.id === id)
+            : allRecords().find(r => r.id === id);
         if (!rec) {
             return;
         }
@@ -989,20 +1077,100 @@ async function bindUi() {
             editingId = id;
             $rec.addClass('open');
             recordsOpen.add(id);
-            renderRecords();
-            $('#miss-records-list [data-role="edit-text"]').trigger('focus');
+            $scope === 'summaries' ? renderSummaries() : renderRecords();
+            $(`#${$scope === 'summaries' ? 'miss-summaries' : 'miss-records'}-list [data-role="edit-text"]`).trigger('focus');
         } else if (act === 'cancel-edit') {
             editingId = null;
-            renderRecords();
+            $scope === 'summaries' ? renderSummaries() : renderRecords();
         } else if (act === 'save-edit') {
             const newText = String($rec.find('[data-role="edit-text"]').val() || '').trim();
             if (!newText) {
-                toast('内容不能为空');
+                toast('内容不能为空', 'warning');
                 return;
             }
             await saveEdit(rec, newText);
         }
     });
+
+    // 重新总结：把所有已总结摘要合并后再总结一次
+    $drawer.on('click', '#miss-resummarize-btn', () => reSummarizeAll());
+}
+
+// 重新总结所有已总结摘要
+async function reSummarizeAll() {
+    const store = getStore();
+    const summaries = Array.isArray(store.summaries) ? store.summaries : [];
+    if (!summaries.length) {
+        toast('暂无已总结摘要，请先执行一次总结', 'warning');
+        return;
+    }
+    const ctx = getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const oldTexts = summaries.map(x => x.content).filter(Boolean);
+    if (!oldTexts.length) {
+        toast('没有可重新总结的内容', 'warning');
+        return;
+    }
+
+    busy = true;
+    setBusy(true);
+    toast('🔄 开始重新总结…', 'info');
+    const prevPreset = currentPresetName();
+    try {
+        const st = sSync();
+        const combined = oldTexts.join('\n\n');
+        const prompt = `${st.summaryPrompt || defaultSettings().summaryPrompt}以下是之前多次总结出的记忆摘要，请把它们重新整合为一份更精炼、按时间线组织的完整摘要：\n\n${combined}`;
+
+        let text, via;
+        try {
+            ({ text, via } = await generateSummaryText(prompt));
+        } catch (e) {
+            throw e;
+        }
+        if (typeof text !== 'string' || !text.trim()) {
+            throw new Error('重新总结失败（模型未返回内容）');
+        }
+        const content = text.trim();
+        const title = (content.split('\n')[0] || '').trim().slice(0, 24)
+            || `重总摘要 ${summaries.length + 1}`;
+
+        // 生成新的合并摘要（保留旧摘要，追加新条目；覆盖范围到当前最新楼层）
+        store.summaries.push({ title, content, ts: Date.now(), upTo: chat.length - 1, resummarized: true });
+        await saveMetadata();
+
+        // 写入世界书
+        let wiName = '';
+        if (sSync().wiEnabled) {
+            try {
+                const wiTarget = await ensureChatWorldInfo();
+                wiName = await saveSummaryToWorldInfo(wiTarget, content);
+            } catch (e) {
+                log('worldinfo write failed (resummarize)', e);
+            }
+        }
+
+        recordsOpen.clear();
+        editingId = null;
+        renderSummaries();
+        renderRecords();
+        await updateTokens();
+        await popupConfirm(
+            `✅ 重新总结完成！\n\n`
+            + `整合了 ${oldTexts.length} 条旧摘要\n`
+            + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
+            + `新摘要标题：${title}\n`
+            + (wiName ? `已写入世界书：「${wiName}」` : ''),
+        );
+    } catch (e) {
+        console.error('[MissSummary] resummarize failed', e);
+        toast(`❌ 重新总结失败：${e?.message || e}`, 'error');
+    } finally {
+        busy = false;
+        setBusy(false);
+        if (st_b() && prevPreset) {
+            setTimeout(() => applyPreset(prevPreset).catch(() => { }), 50);
+        }
+    }
 }
 
 async function onChatChanged() {
@@ -1024,11 +1192,37 @@ function onMessageChanged() {
 }
 
 async function onGeneration() {
-    const keep = Number(sSync().keepVisibleFloors) || 0;
+    const st = sSync();
+    const keep = Number(st.keepVisibleFloors) || 0;
     const ctx = getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
 
-    if (keep > 0 && chat.length > keep) {
+    // 功能4：自动隐藏楼层 — 隐藏所有已被总结覆盖的楼层（≤ 最新摘要的 upTo）
+    // 否则退回旧行为：仅保留最近 keep 楼
+    let hideUpTo = -1;
+    if (st.autoHideFloors) {
+        const summaries = getStore().summaries || [];
+        for (const s of summaries) {
+            if (typeof s.upTo === 'number' && s.upTo > hideUpTo) {
+                hideUpTo = s.upTo;
+            }
+        }
+    }
+
+    if (hideUpTo >= 0) {
+        let changed = false;
+        const from = Math.min(hideUpTo + 1, chat.length);
+        for (let i = 0; i < from; i++) {
+            const m = chat[i];
+            if (m && !m.is_system) {
+                m.is_system = true;
+                changed = true;
+            }
+        }
+        if (changed) {
+            log(`自动隐藏楼层：已隐藏 0~${from - 1} 楼（已总结部分），仅注入摘要`);
+        }
+    } else if (keep > 0 && chat.length > keep) {
         let changed = false;
         const from = chat.length - keep;
         for (let i = 0; i < from; i++) {
@@ -1151,7 +1345,8 @@ async function runSummary(manual) {
         let wiName = '';
         if (sSync().wiEnabled) {
             try {
-                wiName = await saveSummaryToWorldInfo(`总结${nextWiCounter()}`, content);
+                const wiTarget = await ensureChatWorldInfo();
+                wiName = await saveSummaryToWorldInfo(wiTarget, content);
             } catch (e) {
                 log('worldinfo write failed', e);
                 toast(`⚠️ 世界书写入失败：${e?.message || e}`, 'warning');
@@ -1223,6 +1418,69 @@ function nextWiCounter() {
  * - 位置 = atDepth(4)，depth = 999（系统插入深度@D999）
  * - 自动绑定到当前聊天的「聊天世界书」（chat_metadata.world_info）
  */
+/**
+ * 解析总结要写入的世界书名（功能3 智能绑定）：
+ * 1. 当前聊天已绑定聊天世界书 → 直接注入该世界书（第一优先）
+ * 2. 未绑定 → 自动创建「{角色名}总结世界书」并绑定为聊天世界书
+ */
+async function ensureChatWorldInfo() {
+    const wm = await wiMod();
+    if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) {
+        throw new Error('world-info 模块不可用');
+    }
+    const ctx = getContext();
+    if (!ctx.chatMetadata || typeof ctx.chatMetadata !== 'object') {
+        ctx.chatMetadata = {};
+    }
+    // 1) 已绑定聊天世界书：直接复用
+    const bound = String(ctx.chatMetadata.world_info || '').trim();
+    if (bound) {
+        return bound;
+    }
+    // 2) 未绑定：创建「{角色名}总结世界书」
+    const charName = String(ctx.name2 || ctx.characters?.[ctx.characterId]?.name || '').trim() || '角色';
+    const baseName = `${charName}总结世界书`;
+    // 重名处理：已存在同名全局文件时追加序号
+    let name = baseName;
+    let n = 2;
+    while (await worldExists(name)) {
+        name = `${baseName}${n}`;
+        n++;
+    }
+    await wm.saveWorldInfo(name, { entries: {} }, true);
+    try {
+        if (typeof wm.updateWorldInfoList === 'function') {
+            await wm.updateWorldInfoList();
+        }
+    } catch { /* ignore */ }
+    // 绑定为聊天世界书
+    ctx.chatMetadata.world_info = name;
+    try {
+        const mod = await getSTModule();
+        if (mod?.saveMetadata) {
+            await mod.saveMetadata();
+        }
+        if (window.jQuery) {
+            window.jQuery('.chat_lorebook_button').addClass('world_set');
+        }
+    } catch (e) {
+        log('auto bind chat world failed', e);
+    }
+    toast(`📖 角色卡未绑定聊天世界书，已自动创建「${name}」并绑定`, 'info');
+    return name;
+}
+
+async function worldExists(name) {
+    try {
+        const wm = await wiMod();
+        // 通过加载探测（loadWorldInfo 抛错/返回空即不存在）
+        const data = await wm.loadWorldInfo(name);
+        return !!(data && data.entries);
+    } catch {
+        return false;
+    }
+}
+
 async function saveSummaryToWorldInfo(name, content) {
     const wm = await wiMod();
     if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) {
@@ -1373,13 +1631,14 @@ async function subApiGenerate(messages, { maxTokens = 800 } = {}) {
     if (cfg.key) {
         await writeSecretKey(cfg.key);
     }
+    const stream = !!cfg.stream;
     const body = {
         chat_completion_source: source,
         model: String(cfg.model || 'gpt-4o-mini'),
         messages,
         max_tokens: maxTokens,
         temperature: 0.7,
-        stream: false,
+        stream,
         custom_url: url,
         custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
     };
@@ -1390,6 +1649,47 @@ async function subApiGenerate(messages, { maxTokens = 800 } = {}) {
         headers,
         body: JSON.stringify(body),
     });
+
+    // 流式：聚合 SSE 分片直到 [DONE]
+    if (stream && resp.ok && resp.body) {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let text = '';
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith('data:')) {
+                    continue;
+                }
+                const payload = trimmed.slice(5).trim();
+                if (payload === '[DONE]') {
+                    continue;
+                }
+                try {
+                    const chunk = JSON.parse(payload);
+                    const delta = chunk?.choices?.[0]?.delta?.content
+                        ?? chunk?.choices?.[0]?.text
+                        ?? '';
+                    text += delta;
+                } catch { /* skip malformed chunk */ }
+            }
+        }
+        const out = String(text || '').trim();
+        if (!out) {
+            throw new Error('副API流式返回为空');
+        }
+        return out;
+    }
+
+    // 非流式
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.error) {
         throw new Error(data?.error?.message || data?.response || `HTTP ${resp.status}`);
@@ -1500,6 +1800,7 @@ function renderSubApi() {
     $('#miss-subapi-url', $drawer).val(cfg.url || '');
     $('#miss-subapi-key', $drawer).val(cfg.key || '');
     $('#miss-subapi-model', $drawer).val(cfg.model || '');
+    $('#miss-subapi-stream-chk', $drawer).prop('checked', !!cfg.stream);
     $('#miss-subapi-source-row', $drawer).toggle(String(cfg.type || 'openai') === 'openai');
     // 已保存列表
     const names = Object.keys(st.subApiSaved || {});
@@ -1520,12 +1821,13 @@ function renderSubApi() {
 
 function readSubApiForm() {
     const st = sSync();
-    st.subApi = st.subApi || { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false };
+    st.subApi = st.subApi || { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false };
     st.subApi.type = String($('#miss-subapi-type', $drawer).val() || 'openai');
     st.subApi.source = String($('#miss-subapi-source', $drawer).val() || 'custom');
     st.subApi.url = normalizeSubUrl($('#miss-subapi-url', $drawer).val());
     st.subApi.key = String($('#miss-subapi-key', $drawer).val() || '');
     st.subApi.model = String($('#miss-subapi-model', $drawer).val() || '').trim();
+    st.subApi.stream = $('#miss-subapi-stream-chk', $drawer).prop('checked');
     return st.subApi;
 }
 
@@ -1548,6 +1850,11 @@ function bindSubApiUi() {
     $drawer.on('change', '#miss-subapi-source, #miss-subapi-url, #miss-subapi-key, #miss-subapi-model', function () {
         readSubApiForm();
         saveSettings();
+    });
+    $drawer.on('change', '#miss-subapi-stream-chk', function () {
+        readSubApiForm();
+        saveSettings();
+        toast(sSync().subApi.stream ? '✅ 总结流式传输已开启' : '总结流式传输已关闭');
     });
 
     $drawer.on('click', '#miss-subapi-connect-btn', async function () {
@@ -1642,6 +1949,7 @@ function bindSubApiUi() {
             key: st.subApi.key,
             model: st.subApi.model,
             connected: !!st.subApi.connected,
+            stream: !!st.subApi.stream,
             savedAt: Date.now(),
         };
         st.subApiActive = name;
@@ -1706,6 +2014,7 @@ async function applySubApiSnapshot(name) {
         key: snap.key || '',
         model: snap.model || '',
         connected: !!snap.connected,
+        stream: !!snap.stream,
     };
     st.subApiActive = name;
     saveSettings();
