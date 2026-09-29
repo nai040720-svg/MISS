@@ -1263,34 +1263,22 @@ async function onGeneration() {
     let changed = false;
 
     if (st.autoHideFloors) {
-        // ===== 自动隐藏（规则：总结后只保留最近 1 楼，其余全隐藏含用户楼层，不注入摘要）=====
-        // 隐藏范围：0 .. chat.length-2（保留最后 1 楼）
-        const from = chat.length - 1;
-        for (let i = 0; i < from; i++) {
-            const m = chat[i];
-            if (m && !m.is_system) {
-                m.is_system = true;
-                changed = true;
-            }
-        }
-        if (changed) {
-            log(`自动隐藏：已隐藏 0~${from - 1} 楼（含用户楼层），仅保留最近 1 楼，不注入摘要`);
-        }
-    } else if (keep > 0 && chat.length > keep) {
-        // ===== 自定义隐藏楼层 N（规则：保留最近 N 个角色楼层（不含用户楼层），
-        //       其余全部隐藏（含所有用户楼层），注入摘要）=====
-        // 从尾部往前数 N 个非用户楼层，记下起点 beforeIdx；0..beforeIdx-1 全隐藏
+        // ===== 自动隐藏（用户最终规则：总结确认后，只保留最近一层角色的所有聊天内容，
+        //       该角色楼之后的用户楼层也保留，其余全部隐藏含摘要不注入）=====
+        // 从尾部往前找最近 1 个角色楼层，保留起点 = 它；之前全部隐藏（含用户楼）
         let counted = 0;
-        let beforeIdx = chat.length; // 保留区间的起点（之前全部隐藏）
-        for (let i = chat.length - 1; i >= 0 && counted < keep; i--) {
+        let keepStartIdx = chat.length;
+        for (let i = chat.length - 1; i >= 0; i--) {
             const m = chat[i];
             if (m && !m.is_user && !m.is_system) {
                 counted++;
-                beforeIdx = i; // 最近保留的角色楼层
+                keepStartIdx = i;
+                if (counted >= 1) {
+                    break;
+                }
             }
         }
-        // 隐藏 0 .. beforeIdx-1（含用户楼层与更早的角色楼层）
-        for (let i = 0; i < beforeIdx; i++) {
+        for (let i = 0; i < keepStartIdx; i++) {
             const m = chat[i];
             if (m && !m.is_system) {
                 m.is_system = true;
@@ -1298,7 +1286,35 @@ async function onGeneration() {
             }
         }
         if (changed) {
-            log(`自定义隐藏楼层：保留最近 ${keep} 个角色楼层（第 ${beforeIdx} 楼起），之前全部隐藏（含用户楼层），注入摘要`);
+            log(`自动隐藏：只保留最近一层角色内容（第 ${keepStartIdx} 楼起），之前全部隐藏（含用户楼层与摘要）`);
+        }
+    } else if (keep > 0 && chat.length > keep) {
+        // ===== 自定义隐藏楼层 N（用户最终规则）=====
+        // 保留最近 N 个角色楼层 + 这段区间内的用户楼层（跟随之），其余全部隐藏只显示摘要
+        // 例（keep=2）：0角(隐,摘要) 1用(隐) 2角(隐,摘要) 3用(隐) 4角(留) 5用(留) 6角(留)
+        // 从尾部往前数 N 个角色楼层，保留起点 = 第 N 个角色楼；它之前的全部隐藏（含用户楼）
+        let counted = 0;
+        let keepStartIdx = chat.length; // 保留区间起点（之前全部隐藏）
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const m = chat[i];
+            if (m && !m.is_user && !m.is_system) {
+                counted++;
+                keepStartIdx = i;
+                if (counted >= keep) {
+                    break;
+                }
+            }
+        }
+        // 隐藏 0 .. keepStartIdx-1（含用户楼层与更早的角色楼层）
+        for (let i = 0; i < keepStartIdx; i++) {
+            const m = chat[i];
+            if (m && !m.is_system) {
+                m.is_system = true;
+                changed = true;
+            }
+        }
+        if (changed) {
+            log(`自定义隐藏楼层：保留最近 ${keep} 个角色楼层及其间的用户楼层（第 ${keepStartIdx} 楼起），之前全部隐藏（只显示摘要）`);
         }
     }
 
@@ -1378,8 +1394,9 @@ async function runSummary(manual) {
         // 隐藏楼层：自动隐藏模式下最新摘要 upTo 之后的不可总结部分跳过；
         // 自定义隐藏楼层 N = 最近 N 个角色楼层保留，更早的楼层不参与总结
         let allRecords = extractRecords();
-        // 过滤隐藏楼层：自动隐藏 → 只总结最新摘要 upTo 之后；自定义 N → 只总结保留区（最近N个角色楼）之前的部分
+        // 只总结「被隐藏楼层」里的摘要抓取（保留区楼层原文可见，无需进摘要）
         if (st.autoHideFloors) {
+            // 自动隐藏：隐藏范围 = 最新摘要 upTo 之后（等待总结确认中），只取该范围
             let maxUpTo = -1;
             for (const s of store.summaries) {
                 if (typeof s.upTo === 'number' && s.upTo > maxUpTo) {
@@ -1389,18 +1406,21 @@ async function runSummary(manual) {
             allRecords = allRecords.filter(r => r.msgId > maxUpTo);
         } else {
             const keep = Number(st.keepVisibleFloors) || 0;
-            if (keep > 0 && chat.length > keep) {
-                // 保留区起点 = 最近第 N 个角色楼层的索引；更早楼层不参与总结
+            if (keep > 0) {
+                // 自定义隐藏 N：隐藏区 = 最近第 N 个角色楼之前 → 只取该范围的抓取
                 let counted = 0;
-                let beforeIdx = chat.length;
-                for (let i = chat.length - 1; i >= 0 && counted < keep; i--) {
+                let keepStartIdx = chat.length;
+                for (let i = chat.length - 1; i >= 0; i--) {
                     const m = chat[i];
                     if (m && !m.is_user && !m.is_system) {
                         counted++;
-                        beforeIdx = i;
+                        keepStartIdx = i;
+                        if (counted >= keep) {
+                            break;
+                        }
                     }
                 }
-                allRecords = allRecords.filter(r => r.msgId >= beforeIdx);
+                allRecords = allRecords.filter(r => r.msgId < keepStartIdx);
             }
         }
         // 只取上次总结点之后的新抓取
@@ -1459,14 +1479,30 @@ async function runSummary(manual) {
 
         renderRecords();
         await updateTokens();
+
+        // 完成通知 + 询问是否隐藏以上楼层（包括摘要也隐藏，只保留最近一层角色内容）
         if (manual) {
-            // 完成：ST 弹窗明确告知结果
             await popupConfirm(
                 `✅ 总结已完成！\n\n`
                 + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
                 + `摘要标题：${title}\n`
                 + (wiName ? `已写入世界书：「${wiName}」（已绑定聊天世界书，条目蓝灯@D999）\n\n摘要可在「记忆总结」页查看。` : '\n摘要已存入记录。'),
             );
+        }
+        // 询问用户是否隐藏本次总结覆盖的所有楼层（含摘要，只保留最近一层角色的聊天内容）
+        const wantHide = await popupYesNo(
+            `总结已完成并写入世界书。\n\n是否要隐藏以上所有楼层（包括摘要）？\n`
+            + `选择「是」：只保留最近一层角色的所有聊天内容，其余楼层与摘要全部隐藏。\n`
+            + `选择「否」：保留所有楼层，仅按「隐藏楼层」设置正常隐藏。`,
+        );
+        if (wantHide) {
+            // 只保留最近一层角色楼，其余全部隐藏（含用户楼层），且清空摘要注入
+            sSync().autoHideFloors = true;
+            saveSettings();
+            if ($drawer && $drawer.length) {
+                $('#miss-hide-floors-chk', $drawer).prop('checked', true);
+            }
+            toast('✅ 已隐藏以上楼层（含摘要），只保留最近一层角色内容', 'success');
         }
     } catch (e) {
         console.error('[MissSummary] summarize failed', e);
@@ -2177,6 +2213,20 @@ async function popupConfirm(message) {
         return;
     }
     toastrFn()?.info?.(String(message), 'Miss总结');
+}
+
+// 是/否询问弹窗（ST 原生 CONFIRM），返回 true=用户点是
+async function popupYesNo(message) {
+    const pm = await popupMod();
+    if (pm?.callGenericPopup && pm?.POPUP_TYPE?.CONFIRM) {
+        const r = await pm.callGenericPopup(String(message), pm.POPUP_TYPE.CONFIRM, '', {
+            okButton: '是，隐藏并只保留最近一层角色内容',
+            cancelButton: '否，保留所有楼层',
+        });
+        return r === pm.POPUP_RESULT?.AFFIRMATIVE || r === 1 || r === true;
+    }
+    toastrFn()?.info?.(String(message), 'Miss总结');
+    return false;
 }
 
 // ---------------- 工具 ----------------
