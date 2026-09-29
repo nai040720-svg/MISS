@@ -1,0 +1,388 @@
+/* Miss总结插件 - 绑定 SillyTavern 主题变量，自动跟随用户主题 */
+
+#missSummarySettings {
+    --miss-accent: var(--SmartThemeQuoteColor, var(--SmartThemeBodyColor, #a05a2c));
+    --miss-bg: var(--SmartThemeBlurTintColor, var(--grey30, #2b2b35));
+    --miss-card: var(--black30, rgba(0, 0, 0, 0.25));
+    --miss-text: var(--SmartThemeBodyColor, #e0e0e0);
+    --miss-muted: var(--SmartThemeEmColor, #b0b0b8);
+    --miss-border: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    --miss-font: var(--SmartThemeFont, inherit);
+    --miss-radius: var(--borderRadius, 10px);
+
+    font-family: var(--miss-font);
+    color: var(--miss-text);
+}
+
+/* 导航栏 */
+#missSummarySettings .miss-nav {
+    display: flex;
+    gap: 6px;
+    margin: 6px 0 10px;
+}
+
+#missSummarySettings .miss-nav-btn {
+    flex: 1;
+    padding: 8px 10px;
+    border: 1px solid var(--miss-border);
+    border-radius: var(--miss-radius);
+    background: var(--miss-card);
+    color: var(--miss-muted);
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s ease;
+}
+
+#missSummarySettings .miss-nav-btn:hover {
+    border-color: var(--miss-accent);
+    color: var(--miss-text);
+}
+
+#missSummarySettings .miss-nav-btn.active {
+    background: var(--miss-accent);
+    border-color: var(--miss-accent);
+    color: var(--SmartThemeChatTintColor, #fff);
+    font-weight: 600;
+}
+
+#missSummarySettings .miss-panel {
+    display: none;
+}
+
+#missSummarySettings .miss-panel.active {
+    display: block;
+}
+
+/* 字段 */
+#missSummarySettings .miss-field {
+    margin-bottom: 12px;
+}
+
+#missSummarySettings .miss-field > label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--miss-text);
+    margin-bottom: 5px;
+}
+
+#missSummarySettings .miss-hint {
+    font-size: 11.5px;
+    color: var(--miss-muted);
+    margin-top: 4px;
+    line-height: 1.45;
+}
+
+#missSummarySettings .miss-input {
+    width: 100%;
+    padding: 7px 10px;
+    background: var(--miss-card);
+    border: 1px solid var(--miss-border);
+    border-radius: var(--miss-radius);
+    color: var(--miss-text);
+    font-family: var(--miss-font);
+    font-size: 13px;
+    box-sizing: border-box;
+    resize: vertical;
+}
+
+#missSummarySettings .miss-input:focus {
+    outline: none;
+    border-color: var(--miss-accent);
+    box-shadow: 0 0 0 1px var(--miss-accent);
+}
+
+#missSummarySettings .miss-input::placeholder {
+    color: var(--miss-muted);
+    opacity: 0.7;
+}
+
+#missSummarySettings select.miss-input {
+    appearance: auto;
+}
+
+#missSummarySettings select.miss-input option {
+    background: var(--miss-bg);
+    color: var(--miss-text);
+}
+
+/* 按钮与行 */
+#missSummarySettings .miss-inline-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+}
+
+#missSummarySettings .miss-inline-row .miss-input {
+    flex: 1;
+}
+
+#missSummarySettings .miss-btn {
+    padding: 7px 12px;
+    border: 1px solid var(--miss-border);
+    border-radius: var(--miss-radius);
+    background: var(--miss-card);
+    color: var(--miss-text);
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+#missSummarySettings .miss-btn:hover {
+    border-color: var(--miss-accent);
+    color: var(--miss-accent);
+}
+
+#missSummarySettings .miss-btn.primary {
+    background: var(--miss-accent);
+    border-color: var(--miss-accent);
+    color: var(--SmartThemeChatTintColor, #fff);
+}
+
+#missSummarySettings .miss-btn.primary:hover {
+    filter: brightness(1.1);
+    color: var(--SmartThemeChatTintColor, #fff);
+}
+
+#missSummarySettings .miss-btn.disabled,
+#missSummarySettings .miss-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+#missSummarySettings .miss-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--miss-muted);
+    margin-top: 8px;
+    cursor: pointer;
+}
+
+/* 记录列表（细滑动条） */
+#missSummarySettings .miss-records-scroll {
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--miss-border);
+    border-radius: var(--miss-radius);
+    background: var(--miss-card);
+    padding: 4px;
+}
+
+#missSummarySettings .miss-records-scroll::-webkit-scrollbar {
+    width: 4px;
+}
+
+#missSummarySettings .miss-records-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#missSummarySettings .miss-records-scroll::-webkit-scrollbar-thumb {
+    background: var(--miss-accent);
+    border-radius: 4px;
+}
+
+#missSummarySettings .miss-record {
+    border: 1px solid transparent;
+    border-radius: calc(var(--miss-radius) - 2px);
+    margin: 3px 2px;
+    background: transparent;
+    transition: background 0.15s ease;
+}
+
+#missSummarySettings .miss-record:hover {
+    background: var(--miss-bg);
+}
+
+#missSummarySettings .miss-record.open {
+    border-color: var(--miss-border);
+    background: var(--miss-bg);
+}
+
+#missSummarySettings .miss-record-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 9px;
+    cursor: pointer;
+    gap: 8px;
+}
+
+#missSummarySettings .miss-record-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--miss-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+#missSummarySettings .miss-record-badge {
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--miss-accent);
+    color: var(--SmartThemeChatTintColor, #fff);
+    opacity: 0.85;
+    white-space: nowrap;
+}
+
+#missSummarySettings .miss-record-body {
+    display: none;
+    padding: 2px 10px 9px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--miss-muted);
+}
+
+#missSummarySettings .miss-record.open .miss-record-body {
+    display: block;
+}
+
+#missSummarySettings .miss-record-content {
+    max-height: 160px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+#missSummarySettings .miss-record-content::-webkit-scrollbar {
+    width: 4px;
+}
+
+#missSummarySettings .miss-record-content::-webkit-scrollbar-thumb {
+    background: var(--miss-accent);
+    border-radius: 4px;
+}
+
+#missSummarySettings .miss-record-editbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 7px;
+}
+
+/* Token 显示与网格 */
+#missSummarySettings .miss-token-box {
+    border: 1px solid var(--miss-border);
+    border-radius: var(--miss-radius);
+    background: var(--miss-card);
+    padding: 9px 12px;
+    margin-bottom: 10px;
+}
+
+#missSummarySettings .miss-token-label {
+    font-size: 11.5px;
+    color: var(--miss-muted);
+}
+
+#missSummarySettings .miss-token-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--miss-accent);
+    margin-top: 2px;
+}
+
+#missSummarySettings .miss-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+
+#missSummarySettings .miss-grid label {
+    display: block;
+    font-size: 12px;
+    color: var(--miss-muted);
+    margin-bottom: 4px;
+}
+
+/* 保存弹窗 */
+#miss_modal_overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 99999;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(2px);
+}
+
+#miss_modal_overlay .miss-modal {
+    width: min(420px, 90vw);
+    background: var(--SmartThemeBlurTintColor, #2b2b35);
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    border-radius: var(--borderRadius, 10px);
+    padding: 18px;
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    font-family: var(--SmartThemeFont, inherit);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+#miss_modal_overlay .miss-modal h4 {
+    margin: 0 0 10px;
+    color: var(--SmartThemeQuoteColor, #a05a2c);
+}
+
+#miss_modal_overlay .miss-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+/* Toast 提示 */
+#miss_toast {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+}
+
+.miss-toast {
+    background: var(--SmartThemeBlurTintColor, #2b2b35);
+    border: 1px solid var(--SmartThemeQuoteColor, #a05a2c);
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    font-family: var(--SmartThemeFont, inherit);
+    font-size: 13px;
+    padding: 9px 18px;
+    border-radius: var(--borderRadius, 10px);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+}
+
+/* 菜单入口按钮高亮 */
+#miss-menu-item {
+    cursor: pointer;
+}
+
+#miss-menu-item:hover .fa-brain {
+    color: var(--SmartThemeQuoteColor, #a05a2c);
+}
+
+/* 状态点 */
+.miss-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green, #4caf50);
+    display: inline-block;
+    margin-left: 6px;
+}
+
+.miss-dot.busy {
+    background: var(--golden, #ffc107);
+    animation: miss-pulse 1s infinite;
+}
+
+@keyframes miss-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}

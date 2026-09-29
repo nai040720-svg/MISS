@@ -1,0 +1,12 @@
+{
+    "display_name": "Miss总结插件",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "nai040720-svg",
+    "version": "0.1.0",
+    "homePage": "https://github.com/nai040720-svg/MISS",
+    "auto_update": true
+}
