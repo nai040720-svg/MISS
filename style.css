@@ -359,7 +359,10 @@
 }
 
 #missSummarySettings .miss-record-content {
-    color: var(--SmartThemeEmColor, #c8c8d0);
+    /* Bug4：EmColor 在部分主题下太浅，正文改用主文字色保证可读性 */
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    opacity: 0.95;
+    word-break: break-word;
 }
 
 #missSummarySettings .miss-record-editbar {

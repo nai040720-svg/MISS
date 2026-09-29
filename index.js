@@ -241,15 +241,9 @@ function buildDrawer() {
         return;
     }    const html = `
     <div id="missSummarySettings" class="extension_settings">
-        <div class="inline-drawer">
-            <div class="inline-drawer-toggle inline-drawer-header">
-                <b>Miss总结插件</b>
-                <span id="miss-status-dot" class="miss-dot"></span>
-                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-            </div>
-            <div class="inline-drawer-content">
-                <div class="miss-nav">
-                    <button class="miss-nav-btn active" data-tab="setup"><i class="fa-solid fa-sliders"></i> 初始设置</button>
+        <div class="inline-drawer-content" style="display:block;">
+            <div class="miss-nav">
+                <button class="miss-nav-btn active" data-tab="setup"><i class="fa-solid fa-sliders"></i> 初始设置</button>
                     <button class="miss-nav-btn" data-tab="memory"><i class="fa-solid fa-brain"></i> 记忆总结</button>
                 </div>
 
@@ -323,7 +317,6 @@ function buildDrawer() {
                     </div>
                 </div>
             </div>
-        </div>
     </div>`;
 
     const host = document.getElementById('extensions_settings2')
@@ -499,34 +492,49 @@ function cleanTagName(raw) {
     return m ? m[1] : '';
 }
 
+// 多标签清洗：逗号/顿号分隔，逐段清洗后重新拼接（保留多标签格式）
+function cleanTagList(raw) {
+    const parts = String(raw ?? '')
+        .split(/[,，、]/)
+        .map(t => cleanTagName(t))
+        .filter(Boolean);
+    return [...new Set(parts)].join(',');
+}
+
 function extractRecords() {
     const ctx = getContext();
-    const tag = String(sSync().tag || '').trim();
-    if (!tag || !Array.isArray(ctx.chat)) {
+    // Bug3：支持逗号分隔的多标签（中英文逗号、顿号），每个标签独立抓取
+    const rawTags = String(sSync().tag || '').trim();
+    if (!rawTags || !Array.isArray(ctx.chat)) {
         return [];
     }
-    // 大小写不敏感 + 容忍属性/空白：<tag ...>...</tag>
-    const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
+    const tags = [...new Set(rawTags.split(/[,，、]/).map(t => cleanTagName(t)).filter(Boolean))];
+    if (!tags.length) {
+        return [];
+    }
     const records = [];
     ctx.chat.forEach((m, idx) => {
         if (!m || typeof m.mes !== 'string') {
             return;
         }
-        re.lastIndex = 0;
-        const parts = [];
-        let mm;
-        while ((mm = re.exec(m.mes)) !== null) {
-            const t = String(mm[1] || '').trim();
-            if (t) {
-                parts.push(t);
+        for (const tag of tags) {
+            const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
+            re.lastIndex = 0;
+            const parts = [];
+            let mm;
+            while ((mm = re.exec(m.mes)) !== null) {
+                const t = String(mm[1] || '').trim();
+                if (t) {
+                    parts.push(t);
+                }
             }
+            if (!parts.length) {
+                continue;
+            }
+            const content = parts.join('\n');
+            const title = (content.split('\n')[0] || '').trim().slice(0, 24) || `楼层 ${idx + 1}`;
+            records.push({ id: `m${idx}_${tag}`, type: 'extract', title, content, floor: idx + 1, msgId: idx, tag });
         }
-        if (!parts.length) {
-            return;
-        }
-        const content = parts.join('\n');
-        const title = (content.split('\n')[0] || '').trim().slice(0, 24) || `楼层 ${idx + 1}`;
-        records.push({ id: `m${idx}`, type: 'extract', title, content, floor: idx + 1, msgId: idx });
     });
     return records;
 }
@@ -846,8 +854,8 @@ async function bindUi() {
     });
 
     $('#miss-tag-input', $drawer).on('change', function () {
-        sSync().tag = cleanTagName($(this).val());
-        // 输入框回显规范化后的标签名
+        sSync().tag = cleanTagList($(this).val());
+        // 输入框回显规范化后的标签名（多标签逗号分隔）
         $(this).val(sSync().tag);
         saveSettings();
         recordsOpen.clear();
@@ -857,18 +865,18 @@ async function bindUi() {
 
     $('#miss-extract-btn', $drawer).on('click', () => {
         // 先把输入框当前值清洗同步到设置（用户可能没触发 change 就点抓取）
-        sSync().tag = cleanTagName($('#miss-tag-input', $drawer).val());
+        sSync().tag = cleanTagList($('#miss-tag-input', $drawer).val());
         $('#miss-tag-input', $drawer).val(sSync().tag);
         saveSettings();
         if (!sSync().tag) {
-            toast('❌ 摘要标签为空，请先填写标签名（如 summary 或 <summary>）');
+            toast('❌ 摘要标签为空，请先填写标签名（如 summary 或 <summary>，支持逗号分隔多个）');
             return;
         }
         recordsOpen.clear();
         editingId = null;
         renderRecords();
         const n = extractRecords().length;
-        toast(n ? `✅ 已抓取 ${n} 条「${sSync().tag}」摘要` : `未抓取到 <${sSync().tag}>...</${sSync().tag}> 包裹的内容`);
+        toast(n ? `✅ 已抓取 ${n} 条摘要（${sSync().tag}）` : `未抓取到 <${sSync().tag}>...</${sSync().tag}> 包裹的内容`);
     });
 
     $('#miss-preset-select', $drawer).on('change', function () {
@@ -878,10 +886,29 @@ async function bindUi() {
     });
 
     $('#miss-save-btn', $drawer).on('click', async () => {
-        const name = await openSaveModal();
+        // 直接保存：用输入框里的名字；未填则自动分配数字名（1~10 循环，重名自动顺延）
+        let name = String($('#miss-save-name', $drawer).val() || '').trim();
+        const st = sSync();
+        st.savedPresets = st.savedPresets || {};
         if (!name) {
-            return;
+            const taken = new Set(Object.keys(st.savedPresets));
+            for (let i = 1; i <= 10; i++) {
+                if (!taken.has(String(i))) {
+                    name = String(i);
+                    break;
+                }
+            }
+            if (!name) {
+                // 1~10 全占用则寻找更大的可用数字
+                let n = 11;
+                while (taken.has(String(n))) {
+                    n++;
+                }
+                name = String(n);
+            }
+            $('#miss-save-name', $drawer).val(name);
         }
+        $('#miss-save-name', $drawer).val('');
         await saveSnapshot(name);
     });
 
@@ -1170,7 +1197,7 @@ async function applySnapshot(name) {
     if (!snap) {
         return;
     }
-    st.tag = cleanTagName(snap.tag || '');
+    st.tag = cleanTagList(snap.tag || '');
     st.boundPreset = snap.boundPreset || '';
     st.tokenThreshold = Number(snap.tokenThreshold) || 0;
     st.floorThreshold = Number(snap.floorThreshold) || 0;
@@ -1207,45 +1234,6 @@ async function saveEdit(rec, newText) {
 }
 
 // ---------------- 弹窗 / 提示 ----------------
-
-function openSaveModal() {
-    const overlay = $(`
-        <div id="miss_modal_overlay">
-            <div class="miss-modal">
-                <h4><i class="fa-solid fa-floppy-disk"></i> 保存初始设置</h4>
-                <div class="miss-hint" style="margin-bottom:8px;">为本次配置起一个名字：</div>
-                <input class="miss-input" id="miss-save-name-input" type="text" placeholder="例如：轻量记忆 / 完整记忆…" maxlength="30">
-                <div class="miss-modal-actions">
-                    <button class="miss-btn" id="miss-modal-cancel">取消</button>
-                    <button class="miss-btn primary" id="miss-modal-ok"><i class="fa-solid fa-check"></i> 保存</button>
-                </div>
-            </div>
-        </div>`);
-    $('body').append(overlay);
-    const $input = overlay.find('#miss-save-name-input');
-    setTimeout(() => $input.trigger('focus'), 50);
-    const close = () => overlay.remove();
-    return new Promise(resolve => {
-        overlay.find('#miss-modal-cancel').on('click', () => { close(); resolve(null); });
-        overlay.on('click', e => {
-            if (e.target === overlay[0]) { close(); resolve(null); }
-        });
-        const ok = () => {
-            const v = String($input.val() || '').trim();
-            if (!v) {
-                toast('请输入保存名称');
-                return;
-            }
-            close();
-            resolve(v);
-        };
-        overlay.find('#miss-modal-ok').on('click', ok);
-        $input.on('keydown', e => {
-            if (e.key === 'Enter') { ok(); }
-            if (e.key === 'Escape') { close(); resolve(null); }
-        });
-    });
-}
 
 function toast(msg) {
     let $wrap = $('#miss_toast');
