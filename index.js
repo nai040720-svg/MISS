@@ -1602,10 +1602,11 @@ async function ensureChatWorldInfo() {
     // 2) 未绑定：创建「{角色名}总结世界书」
     const charName = String(ctx.name2 || ctx.characters?.[ctx.characterId]?.name || '').trim() || '角色';
     const baseName = `${charName}总结世界书`;
-    // 重名处理：已存在同名全局文件时追加序号
+    // 重名处理：已存在同名全局文件时追加序号（带上限防死循环）
     let name = baseName;
     let n = 2;
-    while (await worldExists(name)) {
+    const MAX_TRIES = 50;
+    while (n - 2 < MAX_TRIES && await worldExists(name)) {
         name = `${baseName}${n}`;
         n++;
     }
@@ -1634,10 +1635,21 @@ async function ensureChatWorldInfo() {
 
 async function worldExists(name) {
     try {
-        const wm = await wiMod();
-        // 通过加载探测（loadWorldInfo 抛错/返回空即不存在）
-        const data = await wm.loadWorldInfo(name);
-        return !!(data && data.entries);
+        // 注意：loadWorldInfo 对不存在的文件后端返回 {entries:{}}（HTTP 200），
+        // 无法用于探测存在性！改用 ST 的 world_names 列表（/api/settings/get 拉取）
+        const mod = await getSTModule();
+        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+        const resp = await fetch('/api/settings/get', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({}),
+        });
+        if (!resp.ok) {
+            return false;
+        }
+        const data = await resp.json().catch(() => ({}));
+        const names = Array.isArray(data?.world_names) ? data.world_names : [];
+        return names.includes(String(name));
     } catch {
         return false;
     }
