@@ -215,6 +215,8 @@ function sSync() {
 let lastTokenCount = 0;
 let busy = false;
 let activeResummaryMessageIds = new Set();
+let selectedHiddenIds = new Set();
+let hiddenSelectionChat = null;
 const recordsOpen = new Set();
 let editingId = null;
 let $drawer = null;
@@ -282,7 +284,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.4.2');
+    log('loaded, version 0.4.4');
 }
 
 // ---------------- UI 构建 ----------------
@@ -423,13 +425,13 @@ function buildDrawer() {
                         <label class="miss-check"><input id="miss-user-input-chk" type="checkbox"> 是否总结用户输入</label>
                         <div class="miss-inline-row" style="margin-top:6px;"><button id="miss-preview-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-eye"></i> 预览将发送的正文</button><button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button></div>
                         <textarea id="miss-send-preview" class="miss-input" rows="10" readonly style="display:none;margin-top:8px;" aria-label="将发送给 AI 总结的正文"></textarea>
-                        <button id="miss-hidden-picker-toggle" class="miss-btn" style="width:100%;margin-top:8px;"><i class="fa-solid fa-ghost"></i> 补总结隐藏楼层</button>
+                        <button id="miss-hidden-picker-toggle" class="miss-btn" type="button" style="width:100%;margin-top:8px;"><i class="fa-solid fa-ghost"></i> 补总结隐藏楼层</button>
                         <div id="miss-hidden-picker" style="display:none;margin-top:8px;">
                             <div class="miss-hint">只列出已隐藏且尚未总结的楼层；补总结会保留原来的隐藏状态。未开启全文时也会抓取无标签正文。</div>
-                            <div class="miss-inline-row"><input id="miss-hidden-from" class="miss-input" type="number" min="1" placeholder="起始楼层"><input id="miss-hidden-to" class="miss-input" type="number" min="1" placeholder="结束楼层"><button id="miss-hidden-range" class="miss-btn">选中范围</button></div>
-                            <div class="miss-inline-row"><button id="miss-hidden-all" class="miss-btn">全选</button><button id="miss-hidden-none" class="miss-btn">清空</button><span id="miss-hidden-count" class="miss-hint"></span></div>
+                            <div class="miss-inline-row"><input id="miss-hidden-from" class="miss-input" type="number" min="1" placeholder="起始楼层"><input id="miss-hidden-to" class="miss-input" type="number" min="1" placeholder="结束楼层"><button id="miss-hidden-range" class="miss-btn" type="button">选中范围</button></div>
+                            <div class="miss-inline-row"><button id="miss-hidden-all" class="miss-btn" type="button">全选</button><button id="miss-hidden-none" class="miss-btn" type="button">清空</button><span id="miss-hidden-count" class="miss-hint"></span></div>
                             <div id="miss-hidden-list" class="miss-records-scroll" style="max-height:220px;overflow-y:auto;"></div>
-                            <div class="miss-inline-row"><button id="miss-hidden-preview-btn" class="miss-btn" style="flex:1;">预览所选正文</button><button id="miss-hidden-summarize-btn" class="miss-btn primary" style="flex:1;">总结所选楼层</button></div>
+                            <div class="miss-inline-row"><button id="miss-hidden-preview-btn" class="miss-btn" type="button" style="flex:1;">预览所选正文</button><button id="miss-hidden-summarize-btn" class="miss-btn primary" type="button" style="flex:1;">总结所选楼层</button></div>
                             <textarea id="miss-hidden-preview" class="miss-input" rows="8" readonly style="display:none;margin-top:8px;" aria-label="补总结将发送的正文"></textarea>
                         </div>
                     </div>
@@ -1448,13 +1450,9 @@ async function bindUi() {
         picker.toggle();
         if (picker.is(':visible')) renderHiddenSummaryPicker();
     });
-    $('#miss-hidden-all', $drawer).on('click', () => {
-        $('#miss-hidden-list input[type="checkbox"]', $drawer).prop('checked', true);
-        updateHiddenSelectionCount();
-    });
+    $('#miss-hidden-all', $drawer).on('click', () => selectHiddenFloors(hiddenSummaryCandidates()));
     $('#miss-hidden-none', $drawer).on('click', () => {
-        $('#miss-hidden-list input[type="checkbox"]', $drawer).prop('checked', false);
-        updateHiddenSelectionCount();
+        selectHiddenFloors([]);
     });
     $('#miss-hidden-range', $drawer).on('click', () => {
         const from = Number($('#miss-hidden-from', $drawer).val());
@@ -1463,13 +1461,15 @@ async function bindUi() {
             toast('请填写有效的起始与结束楼层', 'warning');
             return;
         }
-        $('#miss-hidden-list input[type="checkbox"]', $drawer).each(function () {
-            const floor = Number($(this).val()) + 1;
-            $(this).prop('checked', floor >= from && floor <= to);
-        });
+        selectHiddenFloors(hiddenSummaryCandidates().filter(id => id + 1 >= from && id + 1 <= to));
+    });
+    $('#miss-hidden-list', $drawer).on('change', 'input[type="checkbox"]', function () {
+        const id = Number($(this).val());
+        if (!hiddenSummaryCandidates().includes(id)) return;
+        if (this.checked) selectedHiddenIds.add(id);
+        else selectedHiddenIds.delete(id);
         updateHiddenSelectionCount();
     });
-    $('#miss-hidden-list', $drawer).on('change', 'input[type="checkbox"]', updateHiddenSelectionCount);
     $('#miss-hidden-preview-btn', $drawer).on('click', () => previewHiddenSelection());
     $('#miss-hidden-summarize-btn', $drawer).on('click', () => summarizeHiddenSelection());
 
@@ -1554,12 +1554,19 @@ function hiddenSummaryCandidates() {
 }
 
 function selectedHiddenMessageIds() {
-    return $('#miss-hidden-list input[type="checkbox"]:checked', $drawer)
-        .map(function () { return Number($(this).val()); }).get();
+    return hiddenSummaryCandidates().filter(id => selectedHiddenIds.has(id));
+}
+
+function selectHiddenFloors(ids) {
+    selectedHiddenIds = new Set(ids);
+    $('#miss-hidden-list input[type="checkbox"]', $drawer).each(function () {
+        this.checked = selectedHiddenIds.has(Number(this.value));
+    });
+    updateHiddenSelectionCount();
 }
 
 function updateHiddenSelectionCount() {
-    $('#miss-hidden-count', $drawer).text(`已选 ${selectedHiddenMessageIds().length} 楼`);
+    $('#miss-hidden-count', $drawer).text(`已选 ${selectedHiddenMessageIds().length} / ${hiddenSummaryCandidates().length} 楼`);
     $('#miss-hidden-preview', $drawer).hide();
 }
 
@@ -1567,14 +1574,18 @@ function renderHiddenSummaryPicker() {
     if (!$drawer?.length) return;
     const chat = getContext()?.chat || [];
     const ids = hiddenSummaryCandidates();
-    const existing = $('#miss-hidden-list input[type="checkbox"]', $drawer);
-    const selected = new Set(existing.filter(':checked').map(function () { return Number($(this).val()); }).get());
+    if (hiddenSelectionChat !== chat) {
+        hiddenSelectionChat = chat;
+        selectedHiddenIds = new Set(ids);
+    } else {
+        selectedHiddenIds = new Set(ids.filter(id => selectedHiddenIds.has(id)));
+    }
     $('#miss-hidden-list', $drawer).html(ids.length ? ids.map(id => {
         const message = chat[id];
         const excerpt = String(message.mes).replace(/\s+/g, ' ').slice(0, 60);
-        const checked = !existing.length || selected.has(id) ? ' checked' : '';
+        const checked = selectedHiddenIds.has(id) ? ' checked' : '';
         return `<label class="miss-check"><input type="checkbox" value="${id}"${checked}> 第${id + 1}楼（${message.is_user ? '用户' : '角色'}） ${escapeHtml(excerpt)}</label>`;
-    }).join('') : '<div class="miss-hint">没有待补总结的隐藏楼层。</div>');
+    }).join('') : '<div class="miss-hint">当前没有可补总结的隐藏楼层。已总结楼层不会重复列出；关闭“是否总结用户输入”后，用户楼层也不会列出。</div>');
     updateHiddenSelectionCount();
 }
 
@@ -1608,7 +1619,7 @@ async function preparedHiddenSelection(ids) {
 async function previewHiddenSelection() {
     const ids = selectedHiddenMessageIds();
     if (!ids.length) {
-        toast('请先选择要补总结的楼层', 'warning');
+        toast(hiddenSummaryCandidates().length ? '请先选择要补总结的楼层' : '当前没有可补总结的隐藏楼层', 'warning');
         return;
     }
     const previousPreset = currentPresetName();
@@ -1635,7 +1646,7 @@ async function summarizeHiddenSelection() {
     const available = new Set(hiddenSummaryCandidates());
     if (!ids.length || ids.some(id => !available.has(id))) {
         renderHiddenSummaryPicker();
-        toast('请选择仍然隐藏且尚未总结的楼层', 'warning');
+        toast(available.size ? '请选择仍然隐藏且尚未总结的楼层' : '当前没有可补总结的隐藏楼层', 'warning');
         return;
     }
     const previousPreset = currentPresetName();
@@ -1771,6 +1782,8 @@ async function reSummarizeAt(index) {
 async function onChatChanged() {
     recordsOpen.clear();
     editingId = null;
+    hiddenSelectionChat = null;
+    selectedHiddenIds.clear();
     try {
         const sep = await getSetExtensionPrompt();
         sep(MODULE, '', getPromptTypes().NONE, 0);

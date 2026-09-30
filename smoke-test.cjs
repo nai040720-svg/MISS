@@ -28,7 +28,7 @@ const jquery = arg => {
         return;
     }
     return {
-        on() { return this; }, is() { return false; }, length: 1,
+        on() { return this; }, is() { return false; }, each() { return this; }, hide() { return this; }, length: 1,
         html(value) { if (value !== undefined) rendered[arg] = value; return this; },
         text(value) { if (value !== undefined) rendered[arg] = value; return this; },
     };
@@ -231,10 +231,20 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     assert.equal(vm.runInContext('buildUnifiedRecords().at(-1).content', sandbox), '角色摘要');
     vm.runInContext("_settings.removeWrappedTags = '小冰块,Anti-truncation'", sandbox);
     assert.equal(vm.runInContext("cleanSummaryContent('正文[小冰块]删[/小冰块][Anti-truncation]删[/Anti-truncation]', 'full', 'full')", sandbox), '正文');
+    assert.equal(vm.runInContext("cleanTagList('think,小冰块,Anti-truncation')", sandbox), 'think,小冰块,Anti-truncation');
+    vm.runInContext("_settings.removeWrappedTags = 'think,小冰块,Anti-truncation'", sandbox);
+    assert.equal(vm.runInContext("cleanSummaryContent('正文<think>删一</think>[小冰块]删二[/小冰块][Anti-truncation]删三[/Anti-truncation]', 'full', 'full')", sandbox), '正文');
+    vm.runInContext("_settings.removeWrappedTags = 'Anti-truncation'", sandbox);
     vm.runInContext("_settings.summarizeUserInput = false", sandbox);
     chat.push({ mes: '隐藏的用户输入', is_user: true, is_system: true });
     assert.equal(vm.runInContext("getSummaryInputRecords('full', true).some(r => r.msgId === 5)", sandbox), false);
     assert.deepEqual(Array.from(vm.runInContext('hiddenSummaryCandidates()', sandbox)), [4]);
+    vm.runInContext('$drawer = { length: 1 }; hiddenSelectionChat = null; renderHiddenSummaryPicker()', sandbox);
+    assert.deepEqual(Array.from(vm.runInContext('selectedHiddenMessageIds()', sandbox)), [4]);
+    vm.runInContext('selectedHiddenIds.clear()', sandbox);
+    assert.deepEqual(Array.from(vm.runInContext('selectedHiddenMessageIds()', sandbox)), []);
+    vm.runInContext('selectHiddenFloors(hiddenSummaryCandidates())', sandbox);
+    assert.deepEqual(Array.from(vm.runInContext('selectedHiddenMessageIds()', sandbox)), [4]);
     await vm.runInContext('withVisibleHiddenFloors([4], async () => { if (getContext().chat[4].is_system) throw Error("not visible"); })', sandbox);
     assert.equal(chat[4].is_system, true);
     vm.runInContext(`
@@ -253,11 +263,12 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     `, sandbox);
     const priorPointer = context.chatMetadata.missSummary.lastMessageId;
     await vm.runInContext('summarizeHiddenSelection()', sandbox);
-    assert.equal(sandbox.catchupInput, '角色摘要');
+    assert.equal(sandbox.catchupInput.includes('角色摘要'), true);
+    assert.equal(sandbox.catchupInput.includes('隐藏的用户输入'), false);
     assert.equal(chat[4].is_system, true);
     assert.deepEqual(Array.from(context.chatMetadata.missSummary.summaries.at(-1).sourceMsgIds), [4]);
     assert.equal(context.chatMetadata.missSummary.lastMessageId, priorPointer);
     assert.deepEqual(Array.from(vm.runInContext('hiddenSummaryCandidates()', sandbox)), []);
 
-    console.log('PASS: pure-body preview and send, custom wrapped tags, code/style/count removal, regex, edit safety, redo/delete, API interruption');
+    console.log('PASS: summary input, multiple exclusion tags, hidden-floor selection and catch-up, API interruption');
 })().catch(error => { console.error(error); process.exitCode = 1; });
