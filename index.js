@@ -281,7 +281,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.4.0');
+    log('loaded, version 0.4.1');
 }
 
 // ---------------- UI 构建 ----------------
@@ -711,7 +711,7 @@ function buildUnifiedRecords() {
         records.push({
             id: `m${idx}_${tagged.length ? 'tag' : 'context'}`,
             type: tagged.length ? 'extract' : 'context',
-            title: tagged.length ? (content.split('\n')[0] || `楼层 ${idx + 1}`).slice(0, 24) : `楼层 ${idx + 1}（无标签正文）`,
+            title: (content.split('\n').find(line => line.trim()) || `楼层 ${idx + 1}`).trim().slice(0, 24),
             content, msgId: idx, floor: idx + 1, sourceMessage: m.mes
         });
     });
@@ -738,7 +738,7 @@ function buildFullChatRecords() {
 
 function currentSummaryMode() {
     const st = sSync();
-    return st.sendFullChat ? 'full' : st.captureAllRecords ? 'unified' : 'tags';
+    return st.sendFullChat ? 'full' : getStore().captureAllRecords ? 'unified' : 'tags';
 }
 
 function recordsForMode(mode) {
@@ -755,7 +755,7 @@ function isRecordHidden(record) {
     return hiddenByPlugin || hiddenInChat;
 }
 function allRecords() {
-    return recordsForMode(sSync().captureAllRecords ? 'unified' : 'tags');
+    return recordsForMode(getStore().captureAllRecords ? 'unified' : 'tags');
 }
 function getSummarySourceRecords(mode = currentSummaryMode(), includeHidden = false) {
     const records = recordsForMode(mode);
@@ -773,6 +773,57 @@ function formatSummaryInput(records, mode) {
         const speaker = message?.name || (message?.is_user ? '用户' : '角色');
         return `第${record.floor}楼（${speaker}）：\n${record.content}`;
     }).join('\n\n');
+}
+
+// 总结前沿用酒馆正则引擎的「对提示词生效」规则；不能加载时停止总结，避免泄露被隐藏的正文。
+let _promptRegexEngine = null;
+async function getPromptRegexEngine() {
+    if (!_promptRegexEngine) {
+        try {
+            _promptRegexEngine = await import('../../regex/engine.js');
+        } catch (error) {
+            throw new Error(`无法加载酒馆正则引擎，已取消总结以保护提示词隐藏内容：${error?.message || error}`);
+        }
+    }
+    if (typeof _promptRegexEngine.getRegexedString !== 'function') {
+        throw new Error('酒馆正则引擎不可用，已取消总结以保护提示词隐藏内容');
+    }
+    return _promptRegexEngine;
+}
+
+function taggedContentsFromText(text) {
+    const tags = [...new Set(String(sSync().tag || '').split(/[,，、]/).map(cleanTagName).filter(Boolean))];
+    const contents = [];
+    for (const tag of tags) {
+        const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
+        let match;
+        while ((match = re.exec(text)) !== null) {
+            const value = String(match[1] || '').trim();
+            if (value) contents.push(value);
+        }
+    }
+    return contents;
+}
+
+async function prepareSummaryInputRecords(records, mode) {
+    const { getRegexedString } = await getPromptRegexEngine();
+    const chat = getContext()?.chat || [];
+    const visibleIds = chat.flatMap((message, id) => message && !message.is_system ? [id] : []);
+    const depthById = new Map(visibleIds.map((id, index) => [id, visibleIds.length - index - 1]));
+    return records.flatMap(record => {
+        const message = chat[record.msgId];
+        if (typeof message?.mes !== 'string') return [];
+        const placement = message.is_user ? 1 : 2; // 酒馆的 USER_INPUT / AI_OUTPUT
+        const filtered = getRegexedString(message.mes, placement, {
+            isPrompt: true,
+            depth: depthById.get(record.msgId) ?? 0,
+        });
+        const tagged = mode === 'full' ? [] : taggedContentsFromText(filtered);
+        const content = (mode === 'full' ? filtered
+            : mode === 'tags' ? tagged.join('\n')
+                : tagged.length ? tagged.join('\n') : filtered).trim();
+        return content ? [{ ...record, content }] : [];
+    });
 }
 
 function summaryMessageIds(summary) {
@@ -853,7 +904,7 @@ function renderRecords() {
     if (!recs.length) { $list.html('<div class="miss-hint" style="padding:8px 4px;">暂无记录 — 点击「抓取无标签正文」或先设置摘要标签。</div>'); return; }
     $list.html(recs.map(r => {
         const open = recordsOpen.has(r.id) ? ' open' : '';
-        const badge = r.type === 'context' ? '无标签正文' : `楼层 ${r.floor}`;
+        const badge = r.type === 'context' ? `楼层 ${r.floor} · 无标签正文` : `楼层 ${r.floor}`;
         const isEditing = editingId === r.id;
         const body = isEditing ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(r.content)}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
         return `<div class="miss-record${open}" data-id="${r.id}"><div class="miss-record-header"><span class="miss-record-title">${escapeHtml(r.title)}</span><span class="miss-record-badge">${badge}</span></div><div class="miss-record-body">${body}</div></div>`;
@@ -1372,7 +1423,8 @@ async function reSummarizeAt(index) {
 
     try {
         const idSet = new Set(ids);
-        const sourceRecords = getSummaryInputRecords(mode, true).filter(record => idSet.has(record.msgId));
+        const sourceRecords = await prepareSummaryInputRecords(
+            getSummaryInputRecords(mode, true).filter(record => idSet.has(record.msgId)), mode);
         if (!sourceRecords.length) throw new Error('所选楼层没有当前模式可发送的正文，请检查摘要标签或开启全文。');
         if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
         const generated = await generateSummaryText(formatSummaryInput(sourceRecords, mode));
@@ -1662,6 +1714,11 @@ async function runSummary(manual) {
             if (manual) {
                 toast('没有新的摘要内容需要总结', 'info');
             }
+            return;
+        }
+        allRecords = await prepareSummaryInputRecords(allRecords, mode);
+        if (!allRecords.length) {
+            if (manual) toast('正文已被提示词正则全部隐藏，没有可发送的总结内容', 'warning');
             return;
         }
         // 本次实际总结覆盖到的最后一楼（用于下次总结起点与隐藏范围）
@@ -2588,4 +2645,3 @@ function debounce(fn, wait) {
         t = setTimeout(() => fn(...args), wait);
     };
 }
-
