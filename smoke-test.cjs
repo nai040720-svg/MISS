@@ -74,7 +74,11 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     vm.runInContext(`
         setBusy = () => {};
         currentPresetName = () => null;
-        generateSummaryText = async text => { globalThis.lastResummaryInput = text; return { text: '新总结', via: 'subapi' }; };
+        generateSummaryText = async text => {
+            await onGeneration();
+            globalThis.lastResummaryInput = text;
+            return { text: '新总结', via: 'subapi' };
+        };
         saveMetadata = async () => {};
         syncStoredSummariesWorldInfo = async () => {};
         renderSummaries = () => {};
