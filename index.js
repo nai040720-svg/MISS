@@ -225,6 +225,8 @@ console.log('[MissSummary] module evaluated');
 
 jQuery(() => {
     log('jQuery ready fired');
+    // 菜单入口不依赖设置、弹窗和预设初始化。
+    addMenuButton();
     init().catch(err => {
         console.error('[MissSummary] init failed', err);
         // 加载失败自动重试（应对 ST 各版本模块加载时序差异）
@@ -238,7 +240,8 @@ async function init() {
     }
     const ctx = getContext();
     if (!ctx) {
-        log('context not ready, skip');
+        log('context not ready, retrying');
+        setTimeout(() => init().catch(e => log('retry init failed', e)), 1500);
         return;
     }
     log('step 1/6: settings');
@@ -256,11 +259,11 @@ async function init() {
         bindSubApiUi();
         subApiUiBound = true;
     }
-    renderSubApi();
+    try { renderSubApi(); } catch (e) { log('sub API render failed', e); }
     log('step 5/6: presets');
-    await refreshPresets();
+    try { await refreshPresets(); } catch (e) { log('preset refresh failed', e); }
     log('step 6/6: render');
-    renderAll();
+    try { renderAll(); } catch (e) { log('initial render failed', e); }
 
     const es = await getEventSource();
     const et = await getEventTypes();
@@ -277,7 +280,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.2.0');
+    log('loaded, version 0.3.1');
 }
 
 // ---------------- UI 构建 ----------------
@@ -422,7 +425,7 @@ function buildDrawer() {
                     <div class="miss-field">
                         <label for="miss-summary-prompt-p"><i class="fa-solid fa-feather"></i> 总结提示词（身份：系统，位于破限之后）</label>
                         <textarea id="miss-summary-prompt-p" class="miss-input" rows="4" placeholder="总结指令，将以系统身份发送"></textarea>
-                        <div class="miss-hint">总结请求时以 <b>system</b> 角色发送，位于破限提示词之后、聊天内容之前。最终结构：[system 破限] → [system 总结指令] → [user 聊天内容]。</div>
+                        <div class="miss-hint">最终结构：[system 破限] → [user 摘要正文] → [system 总结指令]。</div>
                     </div>
                 </div>
             </div>
@@ -447,8 +450,8 @@ function addMenuButton(attempt = 0) {
     // 魔法棒菜单 = #extensionsMenu（聊天框左侧 wand 图标弹出的扩展菜单）
     const menu = document.getElementById('extensionsMenu');
     if (!menu) {
-        if (attempt < 20) {
-            setTimeout(() => addMenuButton(attempt + 1), 500);
+        if (attempt < 120) {
+            setTimeout(() => addMenuButton(attempt + 1), 1000);
         } else {
             console.error('[MissSummary] extensionsMenu not found after retries');
         }
@@ -680,7 +683,7 @@ function buildUnifiedRecords() {
     const tags = [...new Set(rawTags.split(/[,，、]/).map(t => cleanTagName(t)).filter(Boolean))];
     const records = [];
     ctx.chat.forEach((m, idx) => {
-        if (!m || typeof m.mes !== 'string' || m.is_system) return;
+        if (!m || typeof m.mes !== 'string') return;
         const tagged = [];
         for (const tag of tags) {
             const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
@@ -697,12 +700,16 @@ function buildUnifiedRecords() {
             type: tagged.length ? 'extract' : 'context',
             title: tagged.length ? (content.split('\n')[0] || `楼层 ${idx + 1}`).slice(0, 24) : `楼层 ${idx + 1}（无标签正文）`,
             content, msgId: idx, floor: idx + 1, sourceMessage: m.mes
-        });    });
+        });
+    });
     return records;
 }
 function isRecordHidden(record) {
     const st = getStore();
-    return !!st.hiddenMessageIds?.[String(record.msgId)] || !!st.hiddenMessageIds?.[record.msgId];
+    const id = String(record.msgId);
+    const hiddenByPlugin = Object.prototype.hasOwnProperty.call(st.hiddenMessageIds || {}, id);
+    const hiddenInChat = !!getContext()?.chat?.[record.msgId]?.is_system;
+    return hiddenByPlugin || hiddenInChat;
 }
 function allRecords() {
     return (sSync().captureAllRecords ? buildUnifiedRecords() : extractRecords());
@@ -1042,19 +1049,34 @@ function currentPresetName() {
 }
 
 async function deleteSummaryWorldInfoEntries() {
-    try {
-        const ctx = getContext(); const name = ctx?.chatMetadata?.[MODULE]?.wiName;
-        if (!name) return; const mod = await getSTModule(); const world = await mod?.loadWorldInfo?.(name);
-        if (!world?.entries) return;
-        for (const [key, entry] of Object.entries(world.entries)) if (String(entry?.comment || '').startsWith('Miss总结')) delete world.entries[key];
-        await mod?.saveWorldInfo?.(name, world);
-    } catch (e) { log('delete summary world info failed', e); }
+    const name = String(getContext()?.chatMetadata?.world_info || '').trim();
+    if (!name) return;
+    const wm = await wiMod();
+    if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) throw new Error('世界书模块不可用');
+    const world = await wm.loadWorldInfo(name);
+    if (!world?.entries) return;
+    let changed = false;
+    for (const [key, entry] of Object.entries(world.entries)) {
+        if (String(entry?.comment || '').startsWith('Miss总结')) {
+            delete world.entries[key];
+            changed = true;
+        }
+    }
+    if (changed) await wm.saveWorldInfo(name, world);
 }
 async function deleteAllSummaries() {
     if (!window.confirm('确定删除全部大总结内容及其世界书条目吗？聊天原文和楼层记录不会删除。')) return;
-    const st = getStore(); st.summaries = []; st.lastMessageId = -1;
-    await saveMetadata(); await deleteSummaryWorldInfoEntries(); renderSummaries();
-    toast('✅ 已删除全部大总结内容', 'success');
+    try {
+        await deleteSummaryWorldInfoEntries();
+        const st = getStore();
+        st.summaries = [];
+        st.lastMessageId = -1;
+        await saveMetadata();
+        renderSummaries();
+        toast('✅ 已删除全部大总结内容', 'success');
+    } catch (e) {
+        toast(`❌ 删除失败：${e?.message || e}`, 'error');
+    }
 }
 // ---------------- 事件 ----------------
 
@@ -1268,7 +1290,7 @@ async function reSummarizeAll() {
         await updateTokens();
         await popupConfirm(
             `✅ 重新总结完成！\n\n`
-            + `整合了 ${taggedTexts.length} 条摘要标签内容\n`
+            + `整合了 ${sourceRecords.length} 条当前未隐藏记录\n`
             + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
             + `新摘要标题：${title}\n`
             + (wiName ? `已写入世界书：「${wiName}」` : ''),
@@ -2078,7 +2100,108 @@ async function generateSummaryText(chatText) {
     }
     if (typeof out !== 'string' || !out.trim()) {
         try {
-            out = await ctx.generateQuietPrompt(prompt, false, false, null, null, 1024);                toast(`❌ 连接失败：${r.error}`);
+            out = await ctx.generateQuietPrompt(prompt, false, false, null, null, 1024);
+        } catch (e) {
+            log('positional generateQuietPrompt failed', e);
+        }
+    }
+    if (typeof out !== 'string' || !out.trim()) {
+        throw new Error('总结生成失败（模型未返回内容）');
+    }
+    return { text: out.trim(), via: 'main' };
+}
+
+// ---------------- 副API UI ----------------
+
+function renderSubApi() {
+    if (!$drawer || !$drawer.length) {
+        return;
+    }
+    const st = sSync();
+    const cfg = st.subApi || {};
+    $('#miss-subapi-type', $drawer).val(cfg.type || 'openai');
+    $('#miss-subapi-source', $drawer).val(cfg.source || 'custom');
+    $('#miss-subapi-url', $drawer).val(cfg.url || '');
+    $('#miss-subapi-key', $drawer).val(cfg.key || '');
+    $('#miss-subapi-model', $drawer).val(cfg.model || '');
+    $('#miss-subapi-stream-chk', $drawer).prop('checked', !!cfg.stream);
+    $('#miss-subapi-temperature', $drawer).val(cfg.temperature ?? '');
+    $('#miss-subapi-source-row', $drawer).toggle(String(cfg.type || 'openai') === 'openai');
+    // 已保存列表
+    const names = Object.keys(st.subApiSaved || {});
+    const $sel = $('#miss-subapi-saved-select', $drawer);
+    $sel.empty().append('<option value="">— 选择已保存的副API —</option>');
+    for (const n of names) {
+        $sel.append($('<option></option>').val(n).text(n));
+    }
+    $sel.val(st.subApiActive && names.includes(st.subApiActive) ? st.subApiActive : '');
+    // 状态行
+    const $status = $('#miss-subapi-status', $drawer);
+    if (cfg.connected) {
+        $status.html(`<span style="color:var(--green,#4caf50);">● 已连接</span> ${escapeHtml(cfg.model || cfg.url || '')}（总结时将使用此副API）`);
+    } else {
+        $status.text('未连接。总结时如已填写副API将使用它生成摘要；未填写则使用酒馆当前连接的API。');
+    }
+}
+
+function readSubApiForm() {
+    const st = sSync();
+    st.subApi = st.subApi || { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false };
+    st.subApi.type = 'openai';
+    st.subApi.source = String($('#miss-subapi-source', $drawer).val() || 'custom');
+    st.subApi.url = normalizeSubUrl($('#miss-subapi-url', $drawer).val());
+    st.subApi.key = String($('#miss-subapi-key', $drawer).val() || '');
+    st.subApi.model = String($('#miss-subapi-model', $drawer).val() || '').trim();
+    st.subApi.stream = $('#miss-subapi-stream-chk', $drawer).prop('checked');
+    const rawTemp = $('#miss-subapi-temperature', $drawer).val();
+    st.subApi.temperature = rawTemp === '' || rawTemp == null ? '' : Math.min(2, Math.max(0, Number(rawTemp)));
+    return st.subApi;
+}
+
+function bindSubApiUi() {
+    // 折叠条展开/收起
+    $drawer.on('click', '#miss-subapi-toggle', function () {
+        $('#miss-subapi-body', $drawer).slideToggle(150);
+        $(this).find('.miss-collapse-icon').toggleClass('open');
+    });
+    $drawer.on('click', '#miss-subapi-saved-toggle', function () {
+        $('#miss-subapi-saved-body', $drawer).slideToggle(150);
+        $(this).find('.miss-collapse-icon').toggleClass('open');
+    });
+
+    $drawer.on('change', '#miss-subapi-type', function () {
+        readSubApiForm();
+        saveSettings();
+        renderSubApi();
+    });
+    $drawer.on('change', '#miss-subapi-source, #miss-subapi-url, #miss-subapi-key, #miss-subapi-model, #miss-subapi-temperature', function () {
+        readSubApiForm();
+        saveSettings();
+    });
+    $drawer.on('change', '#miss-subapi-stream-chk', function () {
+        readSubApiForm();
+        saveSettings();
+        toast(sSync().subApi.stream ? '✅ 总结流式传输已开启' : '总结流式传输已关闭');
+    });
+
+    $drawer.on('click', '#miss-subapi-connect-btn', async function () {
+        const $btn = $(this);
+        $btn.prop('disabled', true);
+        readSubApiForm();
+        const st = sSync();
+        st.subApi.connected = false;
+        saveSettings();
+        renderSubApi();
+        try {
+            const r = await subApiTest();
+            if (r.ok) {
+                sSync().subApi.connected = true;
+                saveSettings();
+                renderSubApi();
+                toast(`✅ 副API连接成功：${r.text}`);
+            } else {
+                renderSubApi();
+                toast(`❌ 连接失败：${r.error}`);
             }
         } finally {
             $btn.prop('disabled', false);
@@ -2097,7 +2220,108 @@ async function generateSummaryText(chatText) {
                 saveSettings();
                 renderSubApi();
             }
-        } finally {    }
+        } finally {
+            $btn.prop('disabled', false);
+        }
+    });
+
+    $drawer.on('click', '#miss-subapi-models-btn', async function () {
+        const $btn = $(this);
+        $btn.prop('disabled', true);
+        readSubApiForm();
+        try {
+            const r = await subApiFetchModels();
+            if (!r.ok) {
+                toast(`❌ 拉取模型失败：${r.error}`);
+                return;
+            }
+            if (!r.models?.length) {
+                toast('未拉取到模型列表');
+                return;
+            }
+            const $input = $('#miss-subapi-model', $drawer);
+            const current = String($input.val() || '');
+            // 拉取到的模型替换为下拉选择（保留手输能力：双击还原为 input）
+            const $sel = $('<select id="miss-subapi-model" class="miss-input"></select>');
+            for (const m of r.models) {
+                $sel.append($('<option></option>').val(m).text(m));
+            }
+            $sel.val(current && r.models.includes(current) ? current : r.models[0]);
+            $input.replaceWith($sel);
+            readSubApiForm();
+            saveSettings();
+            toast(`✅ 已拉取 ${r.models.length} 个模型`);
+            // 换回文本框：双击下拉框
+            $sel.on('dblclick', () => {
+                const v = String($sel.val() || '');
+                const $inp = $('<input id="miss-subapi-model" class="miss-input" type="text" placeholder="模型名，或点右侧拉取">').val(v);
+                $sel.replaceWith($inp);
+            });
+        } finally {
+            $btn.prop('disabled', false);
+        }
+    });
+
+    // 保存当前副API配置
+    $drawer.on('click', '#miss-subapi-save-btn', async () => {
+        const name = String($('#miss-subapi-save-name', $drawer).val() || '').trim()
+            || autoSubApiName();
+        const st = sSync();
+        st.subApiSaved = st.subApiSaved || {};
+        readSubApiForm();
+        st.subApiSaved[name] = {
+            type: st.subApi.type,
+            source: st.subApi.source,
+            url: st.subApi.url,
+            key: st.subApi.key,
+            model: st.subApi.model,
+            connected: !!st.subApi.connected,
+            stream: !!st.subApi.stream,
+            temperature: st.subApi.temperature ?? '',
+            savedAt: Date.now(),
+        };
+        st.subApiActive = name;
+        saveSettings();
+        $('#miss-subapi-save-name', $drawer).val('');
+        renderSubApi();
+        toast(`✅ 已保存副API「${name}」并启用`);
+    });
+
+    // 切换副API
+    $drawer.on('change', '#miss-subapi-saved-select', async function () {
+        const name = String($(this).val() || '');
+        if (!name) {
+            return;
+        }
+        await applySubApiSnapshot(name);
+    });
+
+    // 删除所选副API
+    $drawer.on('click', '#miss-subapi-saved-delete', () => {
+        const st = sSync();
+        const name = String($('#miss-subapi-saved-select', $drawer).val() || '');
+        if (!name || !st.subApiSaved?.[name]) {
+            toast('请先在下方选择栏选择一个已保存的副API');
+            return;
+        }
+        delete st.subApiSaved[name];
+        if (st.subApiActive === name) {
+            st.subApiActive = '';
+        }
+        saveSettings();
+        renderSubApi();
+        toast(`已删除副API「${name}」`);
+    });
+}
+
+function autoSubApiName() {
+    const st = sSync();
+    const taken = new Set(Object.keys(st.subApiSaved || {}));
+    for (let i = 1; i <= 10; i++) {
+        if (!taken.has(String(i))) {
+            return String(i);
+        }
+    }
     let n = 11;
     while (taken.has(String(n))) {
         n++;
@@ -2197,3 +2421,4 @@ function debounce(fn, wait) {
         t = setTimeout(() => fn(...args), wait);
     };
 }
+
