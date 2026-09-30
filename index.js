@@ -280,7 +280,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.3.1');
+    log('loaded, version 0.4.0');
 }
 
 // ---------------- UI 构建 ----------------
@@ -400,8 +400,8 @@ function buildDrawer() {
                         <div class="miss-collapse-body" id="miss-records-body" style="display:none;"><div class="miss-records-scroll"><div id="miss-records-list"></div></div></div>
                     </div>
                     <div class="miss-field">
-                        <div class="miss-collapse-header interactable" id="miss-summaries-toggle" tabindex="0"><b><i class="fa-solid fa-brain"></i> 大总结内容（<span id="miss-summaries-count">0</span>） <button id="miss-delete-summaries-btn" class="miss-btn danger" style="float:right;" title="删除全部大总结内容"><i class="fa-solid fa-trash"></i> 删除</button></b><i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i></div>
-                        <div class="miss-collapse-body" id="miss-summaries-body" style="display:none;"><div class="miss-records-scroll"><div id="miss-summaries-list"></div></div><div class="miss-inline-row" style="margin-top:6px;"><button id="miss-resummarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-rotate-right"></i> 重新总结</button></div><div class="miss-hint">重新总结发送当前所有未隐藏统一记录；删除只删除大总结及世界书条目。</div></div>
+                        <div class="miss-collapse-header interactable" id="miss-summaries-toggle" tabindex="0"><b><i class="fa-solid fa-brain"></i> 大总结内容（<span id="miss-summaries-count">0</span>）</b><i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i></div>
+                        <div class="miss-collapse-body" id="miss-summaries-body" style="display:none;"><div class="miss-records-scroll"><div id="miss-summaries-list"></div></div><div class="miss-hint">每条大总结可单独重新总结或删除；重新总结只处理这条覆盖的楼层。</div></div>
                     </div>
                     <div class="miss-field">
                         <div class="miss-collapse-header interactable" id="miss-summary-settings-toggle" tabindex="0"><b><i class="fa-solid fa-gauge-high"></i> 总结设置</b><i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i></div>
@@ -600,6 +600,18 @@ function getStore() {
             return { ...item, content, title: String(item.title || content.split('\n')[0]).slice(0, 24) };
         })
         .filter(Boolean);
+    // 旧记录只有 upTo，按当时的相邻总结区间补齐楼层范围。
+    let previousUpTo = -1;
+    for (const summary of st.summaries) {
+        if (!Array.isArray(summary.sourceMsgIds) && Number.isInteger(summary.upTo)) {
+            const start = Number.isInteger(summary.from) ? summary.from : previousUpTo + 1;
+            summary.sourceMsgIds = Array.from(
+                { length: Math.max(0, summary.upTo - start + 1) },
+                (_, offset) => start + offset,
+            );
+        }
+        if (Number.isInteger(summary.upTo)) previousUpTo = Math.max(previousUpTo, summary.upTo);
+    }
     if (!st.hiddenMessageIds || typeof st.hiddenMessageIds !== 'object') {
         st.hiddenMessageIds = {};
     }
@@ -704,6 +716,36 @@ function buildUnifiedRecords() {
     });
     return records;
 }
+
+// 全文模式保留每条聊天消息的完整正文；标签正文已包含在原消息内，不重复追加。
+function buildFullChatRecords() {
+    const chat = getContext()?.chat;
+    if (!Array.isArray(chat)) return [];
+    return chat.flatMap((m, msgId) => {
+        const content = typeof m?.mes === 'string' ? m.mes.trim() : '';
+        if (!content) return [];
+        return [{
+            id: `m${msgId}_full`,
+            type: 'full',
+            title: `楼层 ${msgId + 1}（全文）`,
+            content,
+            msgId,
+            floor: msgId + 1,
+        }];
+    });
+}
+
+function currentSummaryMode() {
+    const st = sSync();
+    return st.sendFullChat ? 'full' : st.captureAllRecords ? 'unified' : 'tags';
+}
+
+function recordsForMode(mode) {
+    if (mode === 'full') return buildFullChatRecords();
+    if (mode === 'unified') return buildUnifiedRecords();
+    return buildUnifiedRecords().filter(record => record.type === 'extract');
+}
+
 function isRecordHidden(record) {
     const st = getStore();
     const id = String(record.msgId);
@@ -712,15 +754,33 @@ function isRecordHidden(record) {
     return hiddenByPlugin || hiddenInChat;
 }
 function allRecords() {
-    return (sSync().captureAllRecords ? buildUnifiedRecords() : extractRecords());
+    return recordsForMode(sSync().captureAllRecords ? 'unified' : 'tags');
 }
-function getSummarySourceRecords() {
-    const st = sSync();
-    const records = (st.sendFullChat || st.captureAllRecords) ? buildUnifiedRecords() : extractRecords();
-    return records.filter(r => !isRecordHidden(r));
+function getSummarySourceRecords(mode = currentSummaryMode(), includeHidden = false) {
+    const records = recordsForMode(mode);
+    return includeHidden ? records : records.filter(r => !isRecordHidden(r));
 }
-function getSummaryInputRecords() {
-    return getSummarySourceRecords().sort((a, b) => a.msgId - b.msgId);
+function getSummaryInputRecords(mode = currentSummaryMode(), includeHidden = false) {
+    return getSummarySourceRecords(mode, includeHidden).sort((a, b) => a.msgId - b.msgId);
+}
+
+function formatSummaryInput(records, mode) {
+    if (mode !== 'full') return records.map(record => record.content).join('\n\n');
+    const chat = getContext()?.chat || [];
+    return records.map(record => {
+        const message = chat[record.msgId];
+        const speaker = message?.name || (message?.is_user ? '用户' : '角色');
+        return `第${record.floor}楼（${speaker}）：\n${record.content}`;
+    }).join('\n\n');
+}
+
+function summaryMessageIds(summary) {
+    return [...new Set((Array.isArray(summary?.sourceMsgIds) ? summary.sourceMsgIds : [])
+        .map(Number).filter(id => Number.isInteger(id) && id >= 0))];
+}
+
+function allSummarizedMessageIds(summaries = getStore().summaries) {
+    return new Set(summaries.flatMap(summaryMessageIds));
 }
 function getTaggedContents(records = extractRecords()) {
     return records.map(record => String(record?.content || '').trim()).filter(Boolean);
@@ -742,8 +802,13 @@ function summaryRecords() {
         title: it.title,
         content: it.content,
         entry: it,
+        index: i,
+        fromFloor: (Array.isArray(it.sourceMsgIds) && it.sourceMsgIds.length
+            ? Math.min(...it.sourceMsgIds) : (Number.isInteger(it.from) ? it.from : it.upTo)) + 1,
         floor: (typeof it.upTo === 'number' ? it.upTo : -1) + 1,
-    }));
+        floorDetails: summaryMessageIds(it).map(id => id + 1).join('、'),
+        floorCount: summaryMessageIds(it).length,
+    })).sort((a, b) => b.floor - a.floor);
 }
 
 let _stModule = null;
@@ -825,7 +890,11 @@ function renderSummaries() {
         return `<div class="miss-record${open}" data-id="${r.id}">
             <div class="miss-record-header">
                 <span class="miss-record-title">${escapeHtml(r.title)}</span>
-                <span class="miss-record-badge">总结到 ${r.floor} 楼</span>
+                <span class="miss-record-badge" title="${escapeHtml(r.floorDetails)} 楼">${r.fromFloor}–${r.floor} 楼（${r.floorCount} 条）</span>
+                <span class="miss-summary-actions">
+                    <button class="miss-btn" data-summary-act="resummarize" title="只重新总结这些楼层"><i class="fa-solid fa-rotate-right"></i> 重新总结</button>
+                    <button class="miss-btn danger" data-summary-act="delete" title="只删除这一条大总结"><i class="fa-solid fa-trash"></i> 删除</button>
+                </span>
             </div>
             <div class="miss-record-body">${body}</div>
         </div>`;
@@ -1064,17 +1133,54 @@ async function deleteSummaryWorldInfoEntries() {
     }
     if (changed) await wm.saveWorldInfo(name, world);
 }
-async function deleteAllSummaries() {
-    if (!window.confirm('确定删除全部大总结内容及其世界书条目吗？聊天原文和楼层记录不会删除。')) return;
+
+async function syncStoredSummariesWorldInfo(summaries = getStore().summaries) {
+    const name = String(getContext()?.chatMetadata?.world_info || '').trim();
+    if (!name) return;
+    const contents = summaries.map(summary => String(summary.content || '').trim()).filter(Boolean);
+    if (contents.length) await saveSummaryToWorldInfo(name, contents.join('\n---\n'));
+    else await deleteSummaryWorldInfoEntries();
+}
+
+async function restoreOrphanedHiddenFloors(messageIds, store) {
+    const chat = getContext()?.chat || [];
+    const stillCovered = allSummarizedMessageIds(store.summaries);
+    let changed = false;
+    for (const id of messageIds) {
+        const key = String(id);
+        if (stillCovered.has(id) || !Object.prototype.hasOwnProperty.call(store.hiddenMessageIds || {}, key)) continue;
+        if (chat[id]) {
+            chat[id].is_system = !!store.hiddenMessageIds[key];
+            markMessageHiddenDom(id, !!store.hiddenMessageIds[key]);
+        }
+        delete store.hiddenMessageIds[key];
+        changed = true;
+    }
+    if (changed) await getContext()?.saveChat?.();
+}
+
+async function deleteSummaryAt(index) {
+    if (busy) return;
+    const store = getStore();
+    const target = store.summaries[index];
+    if (!target || !window.confirm(`确定只删除第 ${index + 1} 条大总结吗？它覆盖的独有隐藏楼层会恢复显示。`)) return;
+    const previous = store.summaries.slice();
+    const previousLastId = store.lastMessageId;
     try {
-        await deleteSummaryWorldInfoEntries();
-        const st = getStore();
-        st.summaries = [];
-        st.lastMessageId = -1;
+        store.summaries.splice(index, 1);
+        store.lastMessageId = store.summaries.reduce(
+            (max, summary) => Math.max(max, Number.isInteger(summary.upTo) ? summary.upTo : -1),
+            -1,
+        );
+        await syncStoredSummariesWorldInfo(store.summaries);
+        await restoreOrphanedHiddenFloors(summaryMessageIds(target), store);
         await saveMetadata();
         renderSummaries();
-        toast('✅ 已删除全部大总结内容', 'success');
+        renderRecords();
+        toast('✅ 已删除所选大总结', 'success');
     } catch (e) {
+        store.summaries = previous;
+        store.lastMessageId = previousLastId;
         toast(`❌ 删除失败：${e?.message || e}`, 'error');
     }
 }
@@ -1161,7 +1267,6 @@ async function bindUi() {
         toast(sSync().sendFullChat ? '✅ 全文模式已开启：只发送当前未隐藏统一记录' : '已关闭全文模式', 'info');
     });
     $drawer.on('click', '#miss-capture-records-btn', () => captureAllRecords());
-    $drawer.on('click', '#miss-delete-summaries-btn', e => { e.stopPropagation(); deleteAllSummaries(); });
     $('#miss-summarize-btn', $drawer).on('click', () => runSummary(true));
 
     // 已总结摘要折叠栏：展开/收起
@@ -1225,84 +1330,92 @@ async function bindUi() {
         }
     });
 
-    // 重新总结：把所有已总结摘要合并后再总结一次
-    $drawer.on('click', '#miss-resummarize-btn', () => reSummarizeAll());
+    $('#miss-summaries-list', $drawer).on('click', '[data-summary-act]', async function (e) {
+        e.stopPropagation();
+        const id = String($(this).closest('.miss-record').data('id') || '');
+        const index = Number(id.slice(1));
+        if (!/^s\d+$/.test(id) || !Number.isInteger(index)) return;
+        if ($(this).data('summary-act') === 'delete') await deleteSummaryAt(index);
+        else await reSummarizeAt(index);
+    });
 }
 
-// 重新总结所有已总结摘要
-async function reSummarizeAll() {
+// 单独重新总结一条大总结实际覆盖的楼层。
+async function reSummarizeAt(index) {
+    if (busy) {
+        toast('⏳ 正在总结中，请稍候…', 'warning');
+        return;
+    }
     const store = getStore();
-    const summaries = Array.isArray(store.summaries) ? store.summaries : [];
-    // 重新总结读取当前未隐藏的统一记录，不依赖旧 AI 摘要标题。
-    const sourceRecords = getSummaryInputRecords();
-    if (!sourceRecords.length) {
-        toast('没有可重新总结的摘要标签内容', 'warning');
+    const target = store.summaries[index];
+    if (!target) return;
+    const ids = summaryMessageIds(target);
+    if (!ids.length) {
+        await popupConfirm('这条旧大总结没有可识别的楼层范围，无法安全地单独重新总结。');
         return;
     }
 
+    const chat = getContext()?.chat || [];
+    const snapshots = ids.filter(id => chat[id]).map(id => ({ id, isSystem: !!chat[id].is_system }));
+    const previous = { ...target };
+    const prevPreset = currentPresetName();
+    const mode = currentSummaryMode();
+    let replaced = false;
     busy = true;
     setBusy(true);
-    toast('🔄 开始重新总结…', 'info');
-    const prevPreset = currentPresetName();
+    for (const { id } of snapshots) {
+        chat[id].is_system = false;
+        markMessageHiddenDom(id, false);
+    }
+
     try {
-        const st = sSync();
-        const chatText = sourceRecords.map(r => r.content).join('\n\n');
+        const idSet = new Set(ids);
+        const sourceRecords = getSummaryInputRecords(mode, true).filter(record => idSet.has(record.msgId));
+        if (!sourceRecords.length) throw new Error('所选楼层没有当前模式可发送的正文，请检查摘要标签或开启全文。');
+        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+        const generated = await generateSummaryText(formatSummaryInput(sourceRecords, mode));
+        const content = String(generated.text || '').trim();
+        if (!content) throw new Error('API 未返回完整总结内容');
 
-        let text, via;
-        try {
-            ({ text, via } = await generateSummaryText(chatText));
-        } catch (e) {
-            throw e;
-        }
-        if (typeof text !== 'string' || !text.trim()) {
-            throw new Error('重新总结失败（模型未返回内容）');
-        }
-        const content = text.trim();
-        const title = (content.split('\n')[0] || '').trim().slice(0, 24)
-            || `重总摘要 ${summaries.length + 1}`;
-
-        // 重新总结 = 把之前所有摘要全部重新总结成一份，【替换】旧摘要列表
-        // （不是在已总结的基础上追加；不推进总结点，upTo 取旧摘要最大值）
-        let maxOldUpTo = -1;
-        for (const s of summaries) {
-            if (typeof s.upTo === 'number' && s.upTo > maxOldUpTo) {
-                maxOldUpTo = s.upTo;
-            }
-        }
-        store.summaries = [{ title, content, ts: Date.now(), upTo: maxOldUpTo, resummarized: true }];
-        await saveMetadata();
-
-        // 写入世界书
-        let wiName = '';
+        target.content = content;
+        target.title = (content.split('\n')[0] || '').trim().slice(0, 24);
+        target.ts = Date.now();
+        target.mode = mode;
+        target.sourceMsgIds = [...new Set(sourceRecords.map(record => record.msgId))];
+        target.from = Math.min(...target.sourceMsgIds);
+        target.upTo = Math.max(...target.sourceMsgIds);
+        target.resummarized = true;
         if (sSync().wiEnabled) {
-            try {
-                const wiTarget = await ensureChatWorldInfo();
-                wiName = await saveSummaryToWorldInfo(wiTarget, content);
-            } catch (e) {
-                log('worldinfo write failed (resummarize)', e);
-            }
+            await ensureChatWorldInfo();
+            await syncStoredSummariesWorldInfo(store.summaries);
         }
-
-        recordsOpen.clear();
-        editingId = null;
+        await saveMetadata();
+        replaced = true;
         renderSummaries();
         renderRecords();
         await updateTokens();
         await popupConfirm(
-            `✅ 重新总结完成！\n\n`
-            + `整合了 ${sourceRecords.length} 条当前未隐藏记录\n`
-            + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
-            + `新摘要标题：${title}\n`
-            + (wiName ? `已写入世界书：「${wiName}」` : ''),
+            '✅ 第 ' + (index + 1) + ' 条大总结已重新生成。\n'
+            + '处理楼层：' + (target.from + 1) + '–' + (target.upTo + 1) + ' 楼\n'
+            + '生成通道：' + (generated.via === 'subapi' ? '副API' : '酒馆当前API')
+            + (generated.fallbackError ? '\n⚠️ 副API异常，已改用主API：' + generated.fallbackError : ''),
         );
     } catch (e) {
-        console.error('[MissSummary] resummarize failed', e);
-        toast(`❌ 重新总结失败：${e?.message || e}`, 'error');
+        Object.assign(target, previous);
+        await showSummaryFailure(e, '重新总结');
     } finally {
+        for (const { id, isSystem } of snapshots) {
+            chat[id].is_system = isSystem;
+            markMessageHiddenDom(id, isSystem);
+        }
+        if (replaced) {
+            await restoreOrphanedHiddenFloors(ids, store);
+            await saveMetadata();
+        }
         busy = false;
         setBusy(false);
         if (st_b() && prevPreset) {
-            setTimeout(() => applyPreset(prevPreset).catch(() => { }), 50);
+            setTimeout(() => applyPreset(prevPreset).catch(() => {}), 50);
         }
     }
 }
@@ -1371,6 +1484,7 @@ async function onGeneration() {
 
     const store = getStore();
     let changed = restorePluginHiddenMessages(chat, store);
+    const covered = allSummarizedMessageIds(store.summaries);
 
     if (st.autoHideFloors) {
         // ===== 自动隐藏（用户最终规则：总结确认后，只保留最近一层角色的所有聊天内容，
@@ -1390,7 +1504,7 @@ async function onGeneration() {
         }
         for (let i = 0; i < keepStartIdx; i++) {
             const m = chat[i];
-            if (m && !m.is_system) {
+            if (m && !m.is_system && covered.has(i)) {
                 hideMessageByPlugin(m, i, store);
                 changed = true;
             }
@@ -1418,7 +1532,7 @@ async function onGeneration() {
         // 隐藏 0 .. keepStartIdx-1（含用户楼层与更早的角色楼层）
         for (let i = 0; i < keepStartIdx; i++) {
             const m = chat[i];
-            if (m && !m.is_system) {
+            if (m && !m.is_system && covered.has(i)) {
                 hideMessageByPlugin(m, i, store);
                 changed = true;            }
         }
@@ -1453,6 +1567,16 @@ async function onGeneration() {
 
 // ---------------- 总结 ----------------
 
+async function showSummaryFailure(error, action = '总结') {
+    const message = `❌ ${action}失败：${error?.message || error}`;
+    toast(message, 'error');
+    try {
+        await popupConfirm(message + '\n\n请检查 API 连接、流式返回状态和输出长度设置。');
+    } catch (popupError) {
+        log('summary failure popup unavailable', popupError);
+    }
+}
+
 async function checkAuto() {
     const st = sSync();
     if (!st.autoSummarize || busy) {
@@ -1462,9 +1586,10 @@ async function checkAuto() {
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     const store = getStore();
     const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
-    const newCount = new Set(extractRecords()
+    const newCount = new Set(getSummaryInputRecords()
         .filter(record => record.msgId > lastId)
         .map(record => record.msgId)).size;
+    if (!newCount) return;
 
     let trigger = false;
     if (st.floorThreshold > 0 && newCount >= st.floorThreshold) {
@@ -1503,7 +1628,10 @@ async function runSummary(manual) {
             const mod = await getSTModule();
             const online = String(mod?.online_status || '');
             if (online === 'no_connection') {
-                toast('❌ 未连接任何API（副API未填写，主API未连接），无法总结。请先在副API设置中连接，或连接酒馆主API。', 'error');
+                await showSummaryFailure(
+                    new Error('未连接任何 API。请连接酒馆主 API，或在插件里配置副 API。'),
+                    '总结',
+                );
                 return;
             }
         } catch { /* 无法判断时不拦截 */ }
@@ -1521,8 +1649,9 @@ async function runSummary(manual) {
         const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
 
         // 统一记录按楼层升序发送；隐藏楼层始终排除。
-        let allRecords = getSummaryInputRecords();
-        const useFull = !!st.sendFullChat || !!st.captureAllRecords;
+        const mode = currentSummaryMode();
+        let allRecords = getSummaryInputRecords(mode);
+        const useFull = mode !== 'tags';
         if (!useFull) allRecords = allRecords.filter(r => r.msgId > lastId);
         if (!allRecords.length) {
             if (manual) {
@@ -1534,7 +1663,7 @@ async function runSummary(manual) {
         const lastSummarizedFloor = Math.max(...allRecords.map(r => r.msgId));
 
         // 只发送正文，标题仅用于界面显示。
-        const chatText = allRecords.map(r => r.content).join('\n\n');
+        const chatText = formatSummaryInput(allRecords, mode);
         // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
 
@@ -1545,9 +1674,9 @@ async function runSummary(manual) {
             }
         }
 
-        let text, via;
+        let text, via, fallbackError;
         try {
-            ({ text, via } = await generateSummaryText(prompt));
+            ({ text, via, fallbackError } = await generateSummaryText(prompt));
         } catch (e) {
             log('generateSummaryText failed', e);
             throw e;
@@ -1558,8 +1687,12 @@ async function runSummary(manual) {
         const content = text.trim();
         const title = (content.split('\n')[0] || '').trim().slice(0, 24)
             || `摘要 ${store.summaries.length + 1}`;
-        store.summaries.push({ title, content, ts: Date.now(), upTo: lastSummarizedFloor });
-        store.lastMessageId = lastSummarizedFloor;
+        const sourceMsgIds = [...new Set(allRecords.map(record => record.msgId))];
+        store.summaries.push({
+            title, content, ts: Date.now(), mode, sourceMsgIds,
+            from: Math.min(...sourceMsgIds), upTo: lastSummarizedFloor,
+        });
+        store.lastMessageId = Math.max(lastId, lastSummarizedFloor);
         await saveMetadata();
 
         // 功能2：自动写入聊天世界书
@@ -1567,7 +1700,8 @@ async function runSummary(manual) {
         if (sSync().wiEnabled) {
             try {
                 const wiTarget = await ensureChatWorldInfo();
-                wiName = await saveSummaryToWorldInfo(wiTarget, content);
+                await syncStoredSummariesWorldInfo(store.summaries);
+                wiName = wiTarget;
             } catch (e) {
                 log('worldinfo write failed', e);
                 toast(`⚠️ 世界书写入失败：${e?.message || e}`, 'warning');
@@ -1589,6 +1723,9 @@ async function runSummary(manual) {
                 + (wiName ? `已写入世界书：「${wiName}」（已绑定聊天世界书，条目蓝灯@D999）\n\n摘要可在「记忆总结」页查看。` : '\n摘要已存入记录。'),
             );
         }
+        if (fallbackError) {
+            await popupConfirm(`⚠️ 副API异常，已改用酒馆主API完成总结：${fallbackError}`);
+        }
         // 未勾选自动隐藏时，保留原有的手动确认流程
         if (!sSync().autoHideFloors) {
             const wantHide = await popupYesNo(
@@ -1608,7 +1745,7 @@ async function runSummary(manual) {
         }
     } catch (e) {
         console.error('[MissSummary] summarize failed', e);
-        toast(`❌ 总结失败：${e?.message || e}`, 'error');
+        await showSummaryFailure(e, '总结');
     } finally {
         busy = false;
         setBusy(false);
@@ -1847,11 +1984,12 @@ async function saveEdit(rec, newText) {
         if (m) { m.mes = newText; ctx.saveChat?.(); }
     } else if (rec.entry) {
         rec.entry.content = newText;
+        rec.entry.title = (newText.split('\n')[0] || '').trim().slice(0, 24);
         await saveMetadata();
         if (sSync().wiEnabled) {
             try {
-                const wiTarget = await ensureChatWorldInfo();
-                await saveSummaryToWorldInfo(wiTarget, newText);
+                await ensureChatWorldInfo();
+                await syncStoredSummariesWorldInfo(getStore().summaries);
             } catch (e) {
                 log('worldinfo write failed (edit)', e);
             }
@@ -1859,6 +1997,7 @@ async function saveEdit(rec, newText) {
     }
     editingId = null;
     renderRecords();
+    renderSummaries();
     updateTokens();
     toast('✅ 已保存并覆盖到聊天');
 }
@@ -1891,23 +2030,25 @@ async function writeSecretKey(key) {
     }
 }
 
-function parseSseContent(line) {
+function parseSseEvent(line) {
     const trimmed = String(line || '').trim();
     if (!trimmed.startsWith('data:')) {
-        return '';
+        return null;
     }
     const payload = trimmed.slice(5).trim();
-    if (!payload || payload === '[DONE]') {
-        return '';
-    }
+    if (!payload) return null;
+    if (payload === '[DONE]') return { done: true };
+    let chunk;
     try {
-        const chunk = JSON.parse(payload);
-        return chunk?.choices?.[0]?.delta?.content
-            ?? chunk?.choices?.[0]?.text
-            ?? '';
+        chunk = JSON.parse(payload);
     } catch {
-        return '';
+        throw new Error('副API流式数据解析失败');
     }
+    if (chunk?.error) throw new Error(chunk.error.message || String(chunk.error));
+    return {
+        text: chunk?.choices?.[0]?.delta?.content ?? chunk?.choices?.[0]?.text ?? '',
+        finishReason: chunk?.choices?.[0]?.finish_reason || '',
+    };
 }
 
 async function subApiGenerate(messages, options = {}) {
@@ -1968,6 +2109,15 @@ async function subApiGenerate(messages, options = {}) {
         const decoder = new TextDecoder();
         let buffer = '';
         let text = '';
+        let sawDone = false;
+        let finishReason = '';
+        const consumeLine = line => {
+            const event = parseSseEvent(line);
+            if (!event) return;
+            if (event.done) sawDone = true;
+            if (event.finishReason) finishReason = event.finishReason;
+            text += String(event.text || '');
+        };
         while (true) {
             const { done, value } = await reader.read();
             if (done) {
@@ -1977,11 +2127,18 @@ async function subApiGenerate(messages, options = {}) {
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
             for (const line of lines) {
-                text += parseSseContent(line);
+                consumeLine(line);
             }
         }
+        buffer += decoder.decode();
         if (buffer.trim()) {
-            text += parseSseContent(buffer);
+            consumeLine(buffer);
+        }
+        if (finishReason === 'length' || finishReason === 'max_tokens') {
+            throw new Error('副API输出达到长度上限，摘要已截断');
+        }
+        if (!sawDone && !finishReason) {
+            throw new Error('副API流式连接中断，未收到结束标记');
         }
         const out = String(text || '').trim();
         if (!out) {
@@ -1994,6 +2151,9 @@ async function subApiGenerate(messages, options = {}) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.error) {
         throw new Error(data?.error?.message || data?.response || `HTTP ${resp.status}`);
+    }
+    if (data?.choices?.[0]?.finish_reason === 'length') {
+        throw new Error('副API输出达到长度上限，摘要已截断');
     }
     const text = data?.choices?.[0]?.message?.content
         ?? data?.choices?.[0]?.text
@@ -2079,13 +2239,15 @@ function buildSummaryMessages(chatText) {
 async function generateSummaryText(chatText) {
     const st = sSync();
     const messages = buildSummaryMessages(chatText);
+    let fallbackError = '';
 
     if (st.subApi?.url) {
         try {
             return { text: await subApiGenerate(messages), via: 'subapi' };
         } catch (e) {
+            fallbackError = e?.message || String(e);
             log('subApi generate failed, fallback to ST API', e);
-            toast(`⚠️ 副API失败（${e?.message || e}），改用酒馆当前API`, 'warning');
+            toast(`⚠️ 副API失败（${fallbackError}），改用酒馆当前API`, 'warning');
         }
     }
     // 主 API 按 messages 原顺序拼接，保持：破限提示词 → 摘要信息 → 总结提示词
@@ -2108,7 +2270,7 @@ async function generateSummaryText(chatText) {
     if (typeof out !== 'string' || !out.trim()) {
         throw new Error('总结生成失败（模型未返回内容）');
     }
-    return { text: out.trim(), via: 'main' };
+    return { text: out.trim(), via: 'main', fallbackError };
 }
 
 // ---------------- 副API UI ----------------
