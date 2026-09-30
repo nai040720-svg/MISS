@@ -59,8 +59,6 @@ assert.equal(unified[2].title, '无标签正文');
 vm.runInContext('getStore().captureAllRecords = true; _settings.sendFullChat = false', sandbox);
 assert.deepEqual(Array.from(vm.runInContext('allRecords()', sandbox), r => r.msgId), [0, 1, 2, 3]);
 assert.equal(vm.runInContext('currentSummaryMode()', sandbox), 'unified');
-vm.runInContext('renderRecords()', sandbox);
-assert.match(rendered['#miss-records-list'], /无标签正文<\/span><span class="miss-record-badge">楼层 3 · 无标签正文/);
 vm.runInContext('_settings.sendFullChat = true', sandbox);
 
 const sent = vm.runInContext('getSummaryInputRecords()', sandbox);
@@ -87,18 +85,46 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
             },
         });
     `, sandbox);
-    chat[1].mes += '秘密内容';
-    chat[2].mes += '秘密内容';
+    vm.runInContext("_settings.removeWrappedTags = 'think,wordcount'", sandbox);
+    chat[1].mes += '秘密内容<think>不发送的思考</think><style>.a{color:red}</style>\n```js\nalert(1)\n```\n字数：1234';
+    chat[2].mes += '秘密内容<wordcount>统计一千字</wordcount><div><b>保留的剧情</b></div>';
     const filteredFull = await vm.runInContext("prepareSummaryInputRecords(getSummaryInputRecords('full'), 'full')", sandbox);
     assert.equal(filteredFull.some(r => r.content.includes('秘密内容')), false);
     assert.equal(chat[1].mes.includes('秘密内容'), true, 'stored chat must stay unchanged');
     assert.equal(filteredFull.find(r => r.msgId === 1).content.includes('剧情片段'), true);
+    assert.equal(filteredFull.find(r => r.msgId === 1).content.includes('一号摘要'), true);
+    assert.equal(filteredFull.find(r => r.msgId === 1).content.match(/一号摘要/g).length, 1);
+    assert.equal(filteredFull.find(r => r.msgId === 1).content.includes('不发送的思考'), false);
+    assert.equal(filteredFull.find(r => r.msgId === 1).content.includes('color:red'), false);
+    assert.equal(filteredFull.find(r => r.msgId === 1).content.includes('alert(1)'), false);
+    assert.equal(filteredFull.find(r => r.msgId === 1).content.includes('字数：1234'), false);
+    assert.equal(filteredFull.find(r => r.msgId === 2).content.includes('统计一千字'), false);
+    assert.equal(filteredFull.find(r => r.msgId === 2).content.includes('保留的剧情'), true);
     const filteredUnified = await vm.runInContext("prepareSummaryInputRecords(getSummaryInputRecords('unified'), 'unified')", sandbox);
-    assert.equal(filteredUnified.find(r => r.msgId === 2).content, '无标签正文');
+    assert.equal(filteredUnified.find(r => r.msgId === 2).content.includes('无标签正文'), true);
     assert.equal(filteredUnified.find(r => r.msgId === 1).content.includes('剧情片段'), false);
     assert.equal(sandbox.regexCalls[0].depth, 2);
+    await vm.runInContext('renderRecords()', sandbox);
+    assert.match(rendered['#miss-records-list'], /无标签正文<\/span><span class="miss-record-badge">楼层 3 · 无标签正文/);
+    assert.doesNotMatch(rendered['#miss-records-list'], /秘密内容|不发送的思考|统计一千字|alert\(1\)/);
+    vm.runInContext("editingId = 'm2_context'", sandbox);
+    await vm.runInContext('renderRecords()', sandbox);
+    assert.match(rendered['#miss-records-list'], /秘密内容/, 'edit mode must show original message, not silently overwrite it');
+    vm.runInContext('editingId = null', sandbox);
+    assert.equal(vm.runInContext("cleanSummaryContent('<summary>保留</summary><think>删<think>深删</think>也删</think>正文', 'full', 'full')", sandbox), '正文\n\n保留');
+    assert.equal(vm.runInContext("cleanSummaryContent('正文```js代码```<summary>摘要</summary>字数：12', 'full', 'full')", sandbox), '正文\n\n摘要');
+    assert.equal(vm.runInContext("cleanSummaryContent('正文<pre><code>console.log(1)</code></pre><summary>摘要</summary>', 'full', 'full')", sandbox), '正文\n\n摘要');
+    assert.equal(vm.runInContext("cleanSummaryContent('正文<summary>不保留</summary>', 'full', 'full')", sandbox), '正文\n\n不保留');
+    vm.runInContext("_settings.removeWrappedTags = 'think,summary'", sandbox);
+    assert.equal(vm.runInContext("cleanSummaryContent('正文<summary>不保留</summary>', 'full', 'full')", sandbox), '正文');
+    vm.runInContext("_settings.removeWrappedTags = 'think,wordcount'", sandbox);
+    const filteredTags = await vm.runInContext("prepareSummaryInputRecords(getSummaryInputRecords('tags'), 'tags')", sandbox);
+    assert.equal(filteredTags.find(r => r.msgId === 1).content, '一号摘要\n另一个标签');
     vm.runInContext('getPromptRegexEngine = async () => { throw new Error("正则引擎不可用") }', sandbox);
     await assert.rejects(vm.runInContext("prepareSummaryInputRecords(getSummaryInputRecords('full'), 'full')", sandbox), /正则引擎不可用/);
+    await vm.runInContext('renderRecords()', sandbox);
+    assert.match(rendered['#miss-records-list'], /无法生成安全预览/);
+    assert.doesNotMatch(rendered['#miss-records-list'], /秘密内容/);
     vm.runInContext('getPromptRegexEngine = async () => ({ getRegexedString: input => input.replace(/秘密内容/g, "") })', sandbox);
     context.chatMetadata.missSummary.summaries = [{
         title: '旧总结', content: '旧内容', sourceMsgIds: [3], from: 3, upTo: 3,
@@ -134,6 +160,20 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     assert.equal(context.chatMetadata.missSummary.summaries.length, 1);
     assert.equal(context.chatMetadata.missSummary.summaries[0].title, '另一条');
     assert.equal(chat[3].is_system, false, 'deleted summary floor must become visible');
+
+    vm.runInContext(`
+        window.__missApiChecked = true;
+        _settings.wiEnabled = false;
+        _settings.autoHideFloors = false;
+        generateSummaryText = async text => { globalThis.lastSummaryInput = text; return { text: '大总结', via: 'subapi' }; };
+    `, sandbox);
+    await vm.runInContext('runSummary(true)', sandbox);
+    assert.equal(sandbox.lastSummaryInput.includes('剧情片段'), true);
+    assert.equal(sandbox.lastSummaryInput.includes('不发送的思考'), false);
+    assert.equal(sandbox.lastSummaryInput.includes('秘密内容'), false);
+    assert.equal(sandbox.lastSummaryInput.includes('统计一千字'), false);
+    assert.equal(sandbox.lastSummaryInput.includes('一号摘要'), true);
+    assert.equal(context.chatMetadata.missSummary.summaries.at(-1).content, '大总结');
 
     vm.runInContext(`
         _settings.subApi = { url: 'https://example.invalid', source: 'custom', stream: true };
@@ -184,5 +224,5 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     vm.runInContext("popupConfirm = async message => { globalThis.popupText = message }; toast = () => {}", sandbox);
     await vm.runInContext("showSummaryFailure(new Error('连接中断'), '总结')", sandbox);
     assert.equal(sandbox.popupText.includes('连接中断'), true);
-    console.log('PASS: syntax, capture state/title/floor, prompt regex in full/unified, fail-closed, redo/delete, hidden state, API interruption popup');
+    console.log('PASS: pure-body preview and send, custom wrapped tags, code/style/count removal, regex, edit safety, redo/delete, API interruption');
 })().catch(error => { console.error(error); process.exitCode = 1; });
