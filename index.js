@@ -1577,8 +1577,11 @@ async function runSummary(manual) {
         renderRecords();
         await updateTokens();
 
-        // 完成通知 + 询问是否隐藏以上楼层（包括摘要也隐藏，只保留最近一层角色内容）
-        if (manual) {
+        // 勾选自动隐藏时，完成总结后立即应用隐藏规则，不等待下一次生成
+        if (sSync().autoHideFloors) {
+            await onGeneration();
+            toast('✅ 已立即隐藏旧楼层（摘要通过世界书保留）', 'success');
+        } else if (manual) {
             await popupConfirm(
                 `✅ 总结已完成！\n\n`
                 + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
@@ -1586,20 +1589,22 @@ async function runSummary(manual) {
                 + (wiName ? `已写入世界书：「${wiName}」（已绑定聊天世界书，条目蓝灯@D999）\n\n摘要可在「记忆总结」页查看。` : '\n摘要已存入记录。'),
             );
         }
-        // 询问用户是否隐藏本次总结覆盖的所有楼层（含摘要，只保留最近一层角色的聊天内容）
-        const wantHide = await popupYesNo(
-            `总结已完成并写入世界书。\n\n是否要隐藏以上所有楼层（包括摘要）？\n`
-            + `选择「是」：只保留最近一层角色的所有聊天内容，其余楼层与摘要全部隐藏。\n`
-            + `选择「否」：保留所有楼层，仅按「隐藏楼层」设置正常隐藏。`,
-        );
-        if (wantHide) {
-            // 只保留最近一层角色楼，其余全部隐藏（含用户楼层），且清空摘要注入
-            sSync().autoHideFloors = true;
-            saveSettings();
-            if ($drawer && $drawer.length) {
-                $('#miss-hide-floors-chk', $drawer).prop('checked', true);
+        // 未勾选自动隐藏时，保留原有的手动确认流程
+        if (!sSync().autoHideFloors) {
+            const wantHide = await popupYesNo(
+                `总结已完成并写入世界书。\n\n是否要隐藏以上所有楼层（包括摘要）？\n`
+                + `选择「是」：只保留最近一层角色的所有聊天内容，其余楼层与摘要全部隐藏。\n`
+                + `选择「否」：保留所有楼层，仅按「隐藏楼层」设置正常隐藏。`,
+            );
+            if (wantHide) {
+                sSync().autoHideFloors = true;
+                saveSettings();
+                if ($drawer && $drawer.length) {
+                    $('#miss-hide-floors-chk', $drawer).prop('checked', true);
+                }
+                await onGeneration();
+                toast('✅ 已隐藏以上楼层（含摘要），只保留最近一层角色内容', 'success');
             }
-            toast('✅ 已隐藏以上楼层（含摘要），只保留最近一层角色内容', 'success');
         }
     } catch (e) {
         console.error('[MissSummary] summarize failed', e);
