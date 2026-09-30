@@ -178,6 +178,7 @@ function defaultSettings() {
         autoSummarize: true,
         autoHideFloors: false,
         sendFullChat: false,
+        summarizeUserInput: true,
         captureAllRecords: false,
         // 副API设置
         subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false, temperature: '' },
@@ -302,16 +303,16 @@ function buildDrawer() {
                     <div class="miss-field">
                         <label for="miss-tag-input"><i class="fa-solid fa-tags"></i> 摘要标签</label>
                         <div class="miss-inline-row">
-                            <input id="miss-tag-input" class="miss-input" type="text" placeholder="例如：summary，插件将抓取 &lt;summary&gt;...&lt;/summary&gt; 内容">
+                            <input id="miss-tag-input" class="miss-input" type="text" placeholder="例如：summary,小冰块,Anti-truncation">
                             <button id="miss-extract-btn" class="miss-btn" title="立即抓取"><i class="fa-solid fa-download"></i></button>
                         </div>
-                        <div class="miss-hint">填写标签后，插件会自动抓取聊天气泡中被该标签包裹的内容。</div>
+                        <div class="miss-hint">支持中文、英文及连字符标签，可填写标签名或完整的 &lt;标签&gt;...&lt;/标签&gt;、[标签]...[/标签]；多个标签用逗号分隔。</div>
                     </div>
 
                     <div class="miss-field">
                         <label for="miss-remove-tags-input"><i class="fa-solid fa-filter"></i> 去除正文多余的包裹内容</label>
-                        <input id="miss-remove-tags-input" class="miss-input" type="text" placeholder="例如：think,details,wordcount（填写标签名，逗号分隔）">
-                        <div class="miss-hint">匹配的 &lt;标签&gt;...&lt;/标签&gt; 会连同内部内容一起从记录预览和总结输入中移除；不会修改原聊天。请勿填写需要保留的摘要标签。</div>
+                        <input id="miss-remove-tags-input" class="miss-input" type="text" placeholder="例如：think,小冰块,Anti-truncation（逗号分隔）">
+                        <div class="miss-hint">支持中文、英文及连字符标签；&lt;标签&gt;...&lt;/标签&gt; 和 [标签]...[/标签] 都会连内部内容一起移除。不会修改原聊天，请勿填写需要保留的摘要标签。</div>
                     </div>
 
                     <div class="miss-field">
@@ -419,8 +420,18 @@ function buildDrawer() {
                         <label class="miss-check"><input id="miss-auto-chk" type="checkbox"> 自动总结（达到阈值时自动触发）</label>
                         <label class="miss-check"><input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏已总结楼层</label>
                         <label class="miss-check" title="只发送当前未隐藏楼层；已隐藏楼层视为已经总结过"><input id="miss-full-chat-chk" type="checkbox"> 总结时发送全文（当前未隐藏聊天正文 + 摘要正文）</label>
+                        <label class="miss-check"><input id="miss-user-input-chk" type="checkbox"> 是否总结用户输入</label>
                         <div class="miss-inline-row" style="margin-top:6px;"><button id="miss-preview-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-eye"></i> 预览将发送的正文</button><button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button></div>
                         <textarea id="miss-send-preview" class="miss-input" rows="10" readonly style="display:none;margin-top:8px;" aria-label="将发送给 AI 总结的正文"></textarea>
+                        <button id="miss-hidden-picker-toggle" class="miss-btn" style="width:100%;margin-top:8px;"><i class="fa-solid fa-ghost"></i> 补总结隐藏楼层</button>
+                        <div id="miss-hidden-picker" style="display:none;margin-top:8px;">
+                            <div class="miss-hint">只列出已隐藏且尚未总结的楼层；补总结会保留原来的隐藏状态。未开启全文时也会抓取无标签正文。</div>
+                            <div class="miss-inline-row"><input id="miss-hidden-from" class="miss-input" type="number" min="1" placeholder="起始楼层"><input id="miss-hidden-to" class="miss-input" type="number" min="1" placeholder="结束楼层"><button id="miss-hidden-range" class="miss-btn">选中范围</button></div>
+                            <div class="miss-inline-row"><button id="miss-hidden-all" class="miss-btn">全选</button><button id="miss-hidden-none" class="miss-btn">清空</button><span id="miss-hidden-count" class="miss-hint"></span></div>
+                            <div id="miss-hidden-list" class="miss-records-scroll" style="max-height:220px;overflow-y:auto;"></div>
+                            <div class="miss-inline-row"><button id="miss-hidden-preview-btn" class="miss-btn" style="flex:1;">预览所选正文</button><button id="miss-hidden-summarize-btn" class="miss-btn primary" style="flex:1;">总结所选楼层</button></div>
+                            <textarea id="miss-hidden-preview" class="miss-input" rows="8" readonly style="display:none;margin-top:8px;" aria-label="补总结将发送的正文"></textarea>
+                        </div>
                     </div>
                 </div>
 
@@ -630,25 +641,12 @@ function getStore() {
     return st;
 }
 
-// 智能提取标签名：容忍用户粘贴完整标签 <tag>...</tag>、属性、尖括号、空格
+// 同时接受尖括号、方括号、中文和连字符标签。
 function cleanTagName(raw) {
-    let t = String(raw ?? '').trim();
-    if (!t) {
-        return '';
-    }
-    // 收集所有标签结构中的标识符：<tag> </tag> <tag attr> 等
-    const names = [];
-    const re = /<\/?\s*([A-Za-z_][\w.-]*)\s*[^>]*>/g;
-    const rest = t.replace(re, (full, name) => {
-        names.push(name);
-        return ' ';
-    });
-    const cleaned = rest.replace(/[<>/]/g, ' ').trim();
-    if (names.length) {
-        return names[0];
-    }
-    const m = cleaned.match(/^([A-Za-z_][\w.-]*)/);
-    return m ? m[1] : '';
+    const value = String(raw ?? '').trim();
+    const wrapped = value.match(/^[<\[]\s*\/?\s*([^\s<>\[\]\/]+)(?=[\s>\]])/u);
+    if (wrapped) return wrapped[1];
+    return /^[^\s<>\[\]\/]+$/u.test(value) ? value : '';
 }
 
 // 多标签清洗：逗号/顿号分隔，逐段清洗后重新拼接（保留多标签格式）
@@ -658,6 +656,25 @@ function cleanTagList(raw) {
         .map(t => cleanTagName(t))
         .filter(Boolean);
     return [...new Set(parts)].join(',');
+}
+
+function tagPatterns(tag) {
+    const name = escapeReg(tag);
+    return [
+        new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/\\s*${name}\\s*>`, 'gi'),
+        new RegExp(`\\[${name}\\]([\\s\\S]*?)\\[\\/\\s*${name}\\]`, 'gi'),
+    ];
+}
+
+function tagContents(text, tag) {
+    const matches = [];
+    for (const re of tagPatterns(tag)) {
+        let match;
+        while ((match = re.exec(text)) !== null) {
+            if (match[1].trim()) matches.push({ index: match.index, value: match[1].trim() });
+        }
+    }
+    return matches.sort((a, b) => a.index - b.index).map(match => match.value);
 }
 
 function extractRecords() {
@@ -677,16 +694,7 @@ function extractRecords() {
             return;
         }
         for (const tag of tags) {
-            const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
-            re.lastIndex = 0;
-            const parts = [];
-            let mm;
-            while ((mm = re.exec(m.mes)) !== null) {
-                const t = String(mm[1] || '').trim();
-                if (t) {
-                    parts.push(t);
-                }
-            }
+            const parts = tagContents(m.mes, tag);
             if (!parts.length) {
                 continue;
             }
@@ -707,12 +715,7 @@ function buildUnifiedRecords() {
         if (!m || typeof m.mes !== 'string') return;
         const tagged = [];
         for (const tag of tags) {
-            const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
-            let mm;
-            while ((mm = re.exec(m.mes)) !== null) {
-                const t = String(mm[1] || '').trim();
-                if (t) tagged.push(t);
-            }
+            tagged.push(...tagContents(m.mes, tag));
         }
         const content = tagged.length ? tagged.join('\n') : String(m.mes).trim();
         if (!content) return;
@@ -767,7 +770,10 @@ function allRecords() {
 }
 function getSummarySourceRecords(mode = currentSummaryMode(), includeHidden = false) {
     const records = recordsForMode(mode);
-    return includeHidden ? records : records.filter(r => !isRecordHidden(r));
+    const chat = getContext()?.chat || [];
+    return records.filter(record =>
+        (includeHidden || !isRecordHidden(record))
+        && (sSync().summarizeUserInput !== false || !chat[record.msgId]?.is_user));
 }
 function getSummaryInputRecords(mode = currentSummaryMode(), includeHidden = false) {
     return getSummarySourceRecords(mode, includeHidden).sort((a, b) => a.msgId - b.msgId);
@@ -789,12 +795,15 @@ function removeWrappedBlocks(text, tags) {
     for (const tag of tags) {
         const name = cleanTagName(tag);
         if (!name) continue;
-        const pattern = new RegExp(`<${escapeReg(name)}(?:\\s[^>]*)?>(?:(?!<${escapeReg(name)}(?:\\s|>))[\\s\\S])*?<\\/${escapeReg(name)}\\s*>`, 'gi');
-        // 从最内层开始处理同名嵌套；上限防止异常输入造成卡顿。
-        for (let i = 0; i < 100 && pattern.test(result); i++) {
-            pattern.lastIndex = 0;
-            result = result.replace(pattern, '\n');
-            pattern.lastIndex = 0;
+        for (const pattern of [
+            new RegExp(`<${escapeReg(name)}(?:\\s[^>]*)?>(?:(?!<${escapeReg(name)}(?:\\s|>))[\\s\\S])*?<\\/${escapeReg(name)}\\s*>`, 'gi'),
+            new RegExp(`\\[${escapeReg(name)}\\](?:(?!\\[${escapeReg(name)}\\])[\\s\\S])*?\\[\\/${escapeReg(name)}\\]`, 'gi'),
+        ]) {
+            for (let i = 0; i < 100 && pattern.test(result); i++) {
+                pattern.lastIndex = 0;
+                result = result.replace(pattern, '\n');
+                pattern.lastIndex = 0;
+            }
         }
     }
     return result;
@@ -861,12 +870,7 @@ function taggedContentsFromText(text) {
     const tags = [...new Set(String(sSync().tag || '').split(/[,，、]/).map(cleanTagName).filter(Boolean))];
     const contents = [];
     for (const tag of tags) {
-        const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
-        let match;
-        while ((match = re.exec(text)) !== null) {
-            const value = String(match[1] || '').trim();
-            if (value) contents.push(value);
-        }
+        contents.push(...tagContents(text, tag));
     }
     return contents;
 }
@@ -957,8 +961,10 @@ function renderAll() {
     $('#miss-auto-chk', $drawer).prop('checked', !!st.autoSummarize);
     $('#miss-hide-floors-chk', $drawer).prop('checked', !!st.autoHideFloors);
     $('#miss-full-chat-chk', $drawer).prop('checked', !!st.sendFullChat);
+    $('#miss-user-input-chk', $drawer).prop('checked', st.summarizeUserInput !== false);
     renderRecords();
     renderSummaries();
+    renderHiddenSummaryPicker();
     updateTokens();
 }
 
@@ -1410,6 +1416,12 @@ async function bindUi() {
         $('#miss-send-preview', $drawer).hide();
         toast(sSync().sendFullChat ? '✅ 全文模式已开启：发送未隐藏楼层的纯净正文与摘要' : '已关闭全文模式', 'info');
     });
+    $('#miss-user-input-chk', $drawer).on('change', function () {
+        sSync().summarizeUserInput = $(this).prop('checked');
+        saveSettings();
+        $('#miss-send-preview', $drawer).hide();
+        renderHiddenSummaryPicker();
+    });
     $('#miss-preview-btn', $drawer).on('click', async () => {
         const $preview = $('#miss-send-preview', $drawer);
         const previousPreset = currentPresetName();
@@ -1431,6 +1443,35 @@ async function bindUi() {
     });
     $drawer.on('click', '#miss-capture-records-btn', () => captureAllRecords());
     $('#miss-summarize-btn', $drawer).on('click', () => runSummary(true));
+    $('#miss-hidden-picker-toggle', $drawer).on('click', function () {
+        const picker = $('#miss-hidden-picker', $drawer);
+        picker.toggle();
+        if (picker.is(':visible')) renderHiddenSummaryPicker();
+    });
+    $('#miss-hidden-all', $drawer).on('click', () => {
+        $('#miss-hidden-list input[type="checkbox"]', $drawer).prop('checked', true);
+        updateHiddenSelectionCount();
+    });
+    $('#miss-hidden-none', $drawer).on('click', () => {
+        $('#miss-hidden-list input[type="checkbox"]', $drawer).prop('checked', false);
+        updateHiddenSelectionCount();
+    });
+    $('#miss-hidden-range', $drawer).on('click', () => {
+        const from = Number($('#miss-hidden-from', $drawer).val());
+        const to = Number($('#miss-hidden-to', $drawer).val());
+        if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) {
+            toast('请填写有效的起始与结束楼层', 'warning');
+            return;
+        }
+        $('#miss-hidden-list input[type="checkbox"]', $drawer).each(function () {
+            const floor = Number($(this).val()) + 1;
+            $(this).prop('checked', floor >= from && floor <= to);
+        });
+        updateHiddenSelectionCount();
+    });
+    $('#miss-hidden-list', $drawer).on('change', 'input[type="checkbox"]', updateHiddenSelectionCount);
+    $('#miss-hidden-preview-btn', $drawer).on('click', () => previewHiddenSelection());
+    $('#miss-hidden-summarize-btn', $drawer).on('click', () => summarizeHiddenSelection());
 
     // 已总结摘要折叠栏：展开/收起
     $drawer.on('click', '#miss-summaries-toggle', function () {
@@ -1501,6 +1542,147 @@ async function bindUi() {
         if ($(this).data('summary-act') === 'delete') await deleteSummaryAt(index);
         else await reSummarizeAt(index);
     });
+}
+
+// 聊天中已隐藏、尚未被大总结覆盖的楼层。
+function hiddenSummaryCandidates() {
+    const chat = getContext()?.chat || [];
+    const covered = allSummarizedMessageIds();
+    return chat.flatMap((message, id) =>
+        message?.is_system && typeof message.mes === 'string' && message.mes.trim()
+        && !covered.has(id) && (sSync().summarizeUserInput !== false || !message.is_user) ? [id] : []);
+}
+
+function selectedHiddenMessageIds() {
+    return $('#miss-hidden-list input[type="checkbox"]:checked', $drawer)
+        .map(function () { return Number($(this).val()); }).get();
+}
+
+function updateHiddenSelectionCount() {
+    $('#miss-hidden-count', $drawer).text(`已选 ${selectedHiddenMessageIds().length} 楼`);
+    $('#miss-hidden-preview', $drawer).hide();
+}
+
+function renderHiddenSummaryPicker() {
+    if (!$drawer?.length) return;
+    const chat = getContext()?.chat || [];
+    const ids = hiddenSummaryCandidates();
+    const existing = $('#miss-hidden-list input[type="checkbox"]', $drawer);
+    const selected = new Set(existing.filter(':checked').map(function () { return Number($(this).val()); }).get());
+    $('#miss-hidden-list', $drawer).html(ids.length ? ids.map(id => {
+        const message = chat[id];
+        const excerpt = String(message.mes).replace(/\s+/g, ' ').slice(0, 60);
+        const checked = !existing.length || selected.has(id) ? ' checked' : '';
+        return `<label class="miss-check"><input type="checkbox" value="${id}"${checked}> 第${id + 1}楼（${message.is_user ? '用户' : '角色'}） ${escapeHtml(excerpt)}</label>`;
+    }).join('') : '<div class="miss-hint">没有待补总结的隐藏楼层。</div>');
+    updateHiddenSelectionCount();
+}
+
+// 临时恢复目标楼层以沿用酒馆提示词正则的深度，并在操作结束后恢复隐藏状态。
+async function withVisibleHiddenFloors(ids, action) {
+    const chat = getContext()?.chat || [];
+    const snapshots = ids.filter(id => chat[id]).map(id => ({ id, hidden: !!chat[id].is_system }));
+    activeResummaryMessageIds = new Set(ids);
+    try {
+        for (const { id } of snapshots) {
+            chat[id].is_system = false;
+            markMessageHiddenDom(id, false);
+        }
+        return await action();
+    } finally {
+        for (const { id, hidden } of snapshots) {
+            chat[id].is_system = hidden;
+            markMessageHiddenDom(id, hidden);
+        }
+        activeResummaryMessageIds.clear();
+    }
+}
+
+async function preparedHiddenSelection(ids) {
+    const mode = sSync().sendFullChat ? 'full' : 'unified';
+    const chosen = new Set(ids);
+    const records = getSummaryInputRecords(mode, true).filter(record => chosen.has(record.msgId));
+    return { mode, prepared: await prepareSummaryInputRecords(records, mode) };
+}
+
+async function previewHiddenSelection() {
+    const ids = selectedHiddenMessageIds();
+    if (!ids.length) {
+        toast('请先选择要补总结的楼层', 'warning');
+        return;
+    }
+    const previousPreset = currentPresetName();
+    try {
+        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+        const { mode, prepared } = await withVisibleHiddenFloors(ids, () => preparedHiddenSelection(ids));
+        $('#miss-hidden-preview', $drawer).val(prepared.length
+            ? formatSummaryInput(prepared, mode) : '所选楼层没有可发送的正文。').show();
+    } catch (error) {
+        $('#miss-hidden-preview', $drawer).val(`无法生成安全预览：${error?.message || error}`).show();
+    } finally {
+        if (sSync().boundPreset && previousPreset && previousPreset !== sSync().boundPreset) {
+            try { await applyPreset(previousPreset); } catch (error) { log('preset restore failed', error); }
+        }
+    }
+}
+
+async function summarizeHiddenSelection() {
+    if (busy) {
+        toast('⏳ 正在总结中，请稍候…', 'warning');
+        return;
+    }
+    const ids = selectedHiddenMessageIds();
+    const available = new Set(hiddenSummaryCandidates());
+    if (!ids.length || ids.some(id => !available.has(id))) {
+        renderHiddenSummaryPicker();
+        toast('请选择仍然隐藏且尚未总结的楼层', 'warning');
+        return;
+    }
+    const previousPreset = currentPresetName();
+    busy = true;
+    setBusy(true);
+    try {
+        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+        await withVisibleHiddenFloors(ids, async () => {
+            const { mode, prepared } = await preparedHiddenSelection(ids);
+            if (!prepared.length) throw new Error('所选楼层没有可发送的正文，请检查过滤规则');
+            const generated = await generateSummaryText(formatSummaryInput(prepared, mode));
+            const content = String(generated.text || '').trim();
+            if (!content) throw new Error('API 未返回完整总结内容');
+            const sourceMsgIds = [...new Set(prepared.map(record => record.msgId))];
+            const store = getStore();
+            store.summaries.push({
+                title: (content.split('\n')[0] || '').trim().slice(0, 24),
+                content, ts: Date.now(), mode, sourceMsgIds,
+                from: Math.min(...sourceMsgIds), upTo: Math.max(...sourceMsgIds),
+            });
+            await saveMetadata();
+            if (sSync().wiEnabled) {
+                try {
+                    await ensureChatWorldInfo();
+                    await syncStoredSummariesWorldInfo(store.summaries);
+                } catch (error) {
+                    log('worldinfo write failed', error);
+                    toast(`⚠️ 世界书写入失败：${error?.message || error}`, 'warning');
+                }
+            }
+            renderSummaries();
+            renderRecords();
+            await updateTokens();
+            toast(`✅ 已补总结 ${sourceMsgIds.length} 楼`, 'success');
+            if (generated.fallbackError) toast(`⚠️ 副API异常，已改用主API：${generated.fallbackError}`, 'warning');
+        });
+        renderHiddenSummaryPicker();
+    } catch (error) {
+        await showSummaryFailure(error, '补总结');
+    } finally {
+        try { await getContext()?.saveChat?.(); } catch (error) { log('restore hidden floors save failed', error); }
+        busy = false;
+        setBusy(false);
+        if (sSync().boundPreset && previousPreset && previousPreset !== sSync().boundPreset) {
+            try { await applyPreset(previousPreset); } catch (error) { log('preset restore failed', error); }
+        }
+    }
 }
 
 // 单独重新总结一条大总结实际覆盖的楼层。
@@ -1602,6 +1784,7 @@ const debouncedAuto = debounce(() => {
 
 function onMessageChanged() {
     renderRecords();
+    if ($('#miss-hidden-picker', $drawer).is(':visible')) renderHiddenSummaryPicker();
     debouncedAuto();
 }
 
@@ -1880,6 +2063,7 @@ async function runSummary(manual) {
         }
 
         renderRecords();
+        if ($('#miss-hidden-picker', $drawer).is(':visible')) renderHiddenSummaryPicker();
         await updateTokens();
 
         // 勾选自动隐藏时，完成总结后立即应用隐藏规则，不等待下一次生成
@@ -1934,6 +2118,7 @@ function setBusy(on) {
     $('#miss-status-dot', $drawer).toggleClass('busy', !!on);
     const $btn = $('#miss-summarize-btn', $drawer);
     $btn.prop('disabled', !!on).toggleClass('disabled', !!on);
+    $('#miss-hidden-summarize-btn', $drawer).prop('disabled', !!on).toggleClass('disabled', !!on);
 }
 
 // ---------------- 世界书 ----------------

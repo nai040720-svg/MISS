@@ -28,7 +28,7 @@ const jquery = arg => {
         return;
     }
     return {
-        on() { return this; }, length: 1,
+        on() { return this; }, is() { return false; }, length: 1,
         html(value) { if (value !== undefined) rendered[arg] = value; return this; },
         text(value) { if (value !== undefined) rendered[arg] = value; return this; },
     };
@@ -224,5 +224,40 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     vm.runInContext("popupConfirm = async message => { globalThis.popupText = message }; toast = () => {}", sandbox);
     await vm.runInContext("showSummaryFailure(new Error('连接中断'), '总结')", sandbox);
     assert.equal(sandbox.popupText.includes('连接中断'), true);
+    assert.equal(vm.runInContext("cleanTagList('[小冰块][/小冰块], [Anti-truncation][/Anti-truncation]')", sandbox), '小冰块,Anti-truncation');
+    vm.runInContext("_settings.tag = '小冰块,Anti-truncation'; _settings.removeWrappedTags = ''", sandbox);
+    assert.equal(vm.runInContext("cleanSummaryContent('[小冰块]甲[/小冰块]<Anti-truncation>乙</Anti-truncation>', 'tags', 'extract')", sandbox), '甲\n乙');
+    chat.push({ mes: '[小冰块]角色摘要[/小冰块]', is_system: true });
+    assert.equal(vm.runInContext('buildUnifiedRecords().at(-1).content', sandbox), '角色摘要');
+    vm.runInContext("_settings.removeWrappedTags = '小冰块,Anti-truncation'", sandbox);
+    assert.equal(vm.runInContext("cleanSummaryContent('正文[小冰块]删[/小冰块][Anti-truncation]删[/Anti-truncation]', 'full', 'full')", sandbox), '正文');
+    vm.runInContext("_settings.summarizeUserInput = false", sandbox);
+    chat.push({ mes: '隐藏的用户输入', is_user: true, is_system: true });
+    assert.equal(vm.runInContext("getSummaryInputRecords('full', true).some(r => r.msgId === 5)", sandbox), false);
+    assert.deepEqual(Array.from(vm.runInContext('hiddenSummaryCandidates()', sandbox)), [4]);
+    await vm.runInContext('withVisibleHiddenFloors([4], async () => { if (getContext().chat[4].is_system) throw Error("not visible"); })', sandbox);
+    assert.equal(chat[4].is_system, true);
+    vm.runInContext(`
+        _settings.wiEnabled = false;
+        selectedHiddenMessageIds = () => [4];
+        currentPresetName = () => null;
+        setBusy = () => {};
+        renderHiddenSummaryPicker = () => {};
+        renderSummaries = () => {};
+        renderRecords = () => {};
+        updateTokens = async () => {};
+        saveMetadata = async () => {};
+        getPromptRegexEngine = async () => ({ getRegexedString: input => input });
+        generateSummaryText = async text => { globalThis.catchupInput = text; return { text: '补总结结果', via: 'subapi' }; };
+        showSummaryFailure = async error => { throw error };
+    `, sandbox);
+    const priorPointer = context.chatMetadata.missSummary.lastMessageId;
+    await vm.runInContext('summarizeHiddenSelection()', sandbox);
+    assert.equal(sandbox.catchupInput, '角色摘要');
+    assert.equal(chat[4].is_system, true);
+    assert.deepEqual(Array.from(context.chatMetadata.missSummary.summaries.at(-1).sourceMsgIds), [4]);
+    assert.equal(context.chatMetadata.missSummary.lastMessageId, priorPointer);
+    assert.deepEqual(Array.from(vm.runInContext('hiddenSummaryCandidates()', sandbox)), []);
+
     console.log('PASS: pure-body preview and send, custom wrapped tags, code/style/count removal, regex, edit safety, redo/delete, API interruption');
 })().catch(error => { console.error(error); process.exitCode = 1; });
