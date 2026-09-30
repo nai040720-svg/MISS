@@ -168,6 +168,7 @@ async function saveMetadata() {
 function defaultSettings() {
     return {
         tag: '',
+        removeWrappedTags: '',
         boundPreset: '',
         tokenThreshold: 0,
         floorThreshold: 0,
@@ -178,7 +179,6 @@ function defaultSettings() {
         autoHideFloors: false,
         sendFullChat: false,
         captureAllRecords: false,
-        capturedRecords: [],
         // 副API设置
         subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false, temperature: '' },
         subApiSaved: {},   // { name: {type, source, url, key, model, stream} }
@@ -281,7 +281,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.4.1');
+    log('loaded, version 0.4.2');
 }
 
 // ---------------- UI 构建 ----------------
@@ -306,6 +306,12 @@ function buildDrawer() {
                             <button id="miss-extract-btn" class="miss-btn" title="立即抓取"><i class="fa-solid fa-download"></i></button>
                         </div>
                         <div class="miss-hint">填写标签后，插件会自动抓取聊天气泡中被该标签包裹的内容。</div>
+                    </div>
+
+                    <div class="miss-field">
+                        <label for="miss-remove-tags-input"><i class="fa-solid fa-filter"></i> 去除正文多余的包裹内容</label>
+                        <input id="miss-remove-tags-input" class="miss-input" type="text" placeholder="例如：think,details,wordcount（填写标签名，逗号分隔）">
+                        <div class="miss-hint">匹配的 &lt;标签&gt;...&lt;/标签&gt; 会连同内部内容一起从记录预览和总结输入中移除；不会修改原聊天。请勿填写需要保留的摘要标签。</div>
                     </div>
 
                     <div class="miss-field">
@@ -413,7 +419,8 @@ function buildDrawer() {
                         <label class="miss-check"><input id="miss-auto-chk" type="checkbox"> 自动总结（达到阈值时自动触发）</label>
                         <label class="miss-check"><input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏已总结楼层</label>
                         <label class="miss-check" title="只发送当前未隐藏楼层；已隐藏楼层视为已经总结过"><input id="miss-full-chat-chk" type="checkbox"> 总结时发送全文（当前未隐藏聊天正文 + 摘要正文）</label>
-                        <div class="miss-inline-row" style="margin-top:6px;"><button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button></div>
+                        <div class="miss-inline-row" style="margin-top:6px;"><button id="miss-preview-btn" class="miss-btn" style="flex:1;"><i class="fa-solid fa-eye"></i> 预览将发送的正文</button><button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button></div>
+                        <textarea id="miss-send-preview" class="miss-input" rows="10" readonly style="display:none;margin-top:8px;" aria-label="将发送给 AI 总结的正文"></textarea>
                     </div>
                 </div>
 
@@ -618,7 +625,8 @@ function getStore() {
     }
     st.sendFullChat = !!st.sendFullChat;
     st.captureAllRecords = !!st.captureAllRecords;
-    if (!Array.isArray(st.capturedRecords)) st.capturedRecords = [];
+    // 旧版缓存的是未过滤原文，已不再使用；记录始终从当前聊天即时生成安全预览。
+    delete st.capturedRecords;
     return st;
 }
 
@@ -775,6 +783,64 @@ function formatSummaryInput(records, mode) {
     }).join('\n\n');
 }
 
+// 指定包裹块连内容一起删除；普通展示标签只去外壳、保留文字。
+function removeWrappedBlocks(text, tags) {
+    let result = String(text || '');
+    for (const tag of tags) {
+        const name = cleanTagName(tag);
+        if (!name) continue;
+        const pattern = new RegExp(`<${escapeReg(name)}(?:\\s[^>]*)?>(?:(?!<${escapeReg(name)}(?:\\s|>))[\\s\\S])*?<\\/${escapeReg(name)}\\s*>`, 'gi');
+        // 从最内层开始处理同名嵌套；上限防止异常输入造成卡顿。
+        for (let i = 0; i < 100 && pattern.test(result); i++) {
+            pattern.lastIndex = 0;
+            result = result.replace(pattern, '\n');
+            pattern.lastIndex = 0;
+        }
+    }
+    return result;
+}
+
+function removeCodeAndComments(text) {
+    return String(text || '')
+        .replace(/```[\s\S]*?```/g, '\n')
+        .replace(/~~~[\s\S]*?~~~/g, '\n')
+        .replace(/<!--[\s\S]*?-->/g, '\n')
+        .replace(/`[^`\n]+`/g, '');
+}
+
+function stripNonNarrative(text) {
+    return removeCodeAndComments(text)
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(?:p|div|section|article|li|h[1-6])\s*>/gi, '\n')
+        .replace(/<\/?[A-Za-z_][\w.-]*(?:\s[^<>]*?)?\s*\/?>/g, '')
+        .replace(/^\s*(?:字数|字符数|词数|token\s*count|tokens?)\s*[:：]\s*[\d,，]+\s*$/gim, '')
+        .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+        .replace(/(?:\*\*|__|~~)/g, '')
+        .replace(/&(?:nbsp|amp|lt|gt|quot|#39);/gi, entity => ({
+            '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'",
+        })[entity.toLowerCase()] || entity)
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+function cleanSummaryContent(filtered, mode, sourceType) {
+    const custom = cleanTagList(sSync().removeWrappedTags).split(',').filter(Boolean);
+    const source = removeWrappedBlocks(removeCodeAndComments(filtered),
+        [...custom, 'script', 'style', 'svg', 'iframe', 'noscript', 'template', 'pre', 'code']);
+    const tags = cleanTagList(sSync().tag).split(',').filter(Boolean);
+    const summaries = taggedContentsFromText(source).map(stripNonNarrative).filter(Boolean);
+    if (mode === 'tags' || (mode === 'unified' && sourceType === 'extract')) {
+        return [...new Set(summaries)].join('\n');
+    }
+    const body = stripNonNarrative(removeWrappedBlocks(source, tags));
+    if (mode === 'unified') return body;
+    const unique = [...new Set(summaries)].filter(part => !body.includes(part));
+    return [body, ...unique].filter(Boolean).join('\n\n');
+}
+
 // 总结前沿用酒馆正则引擎的「对提示词生效」规则；不能加载时停止总结，避免泄露被隐藏的正文。
 let _promptRegexEngine = null;
 async function getPromptRegexEngine() {
@@ -818,11 +884,9 @@ async function prepareSummaryInputRecords(records, mode) {
             isPrompt: true,
             depth: depthById.get(record.msgId) ?? 0,
         });
-        const tagged = mode === 'full' ? [] : taggedContentsFromText(filtered);
-        const content = (mode === 'full' ? filtered
-            : mode === 'tags' ? tagged.join('\n')
-                : tagged.length ? tagged.join('\n') : filtered).trim();
-        return content ? [{ ...record, content }] : [];
+        const content = cleanSummaryContent(filtered, mode, record.type);
+        const title = (content.split('\n').find(line => line.trim()) || record.title).trim().slice(0, 24);
+        return content ? [{ ...record, title, content }] : [];
     });
 }
 
@@ -837,13 +901,13 @@ function allSummarizedMessageIds(summaries = getStore().summaries) {
 function getTaggedContents(records = extractRecords()) {
     return records.map(record => String(record?.content || '').trim()).filter(Boolean);
 }
-function captureAllRecords() {
+async function captureAllRecords() {
     const st = getStore();
     st.captureAllRecords = true;
-    st.capturedRecords = buildUnifiedRecords();
-    saveMetadata();
-    renderRecords();
-    toast(`✅ 已抓取 ${st.capturedRecords.length} 条统一记录（标签正文 + 无标签正文）`, 'success');
+    await saveMetadata();
+    const count = await renderRecords();
+    if (Number.isInteger(count)) toast(`✅ 已抓取 ${count} 条纯净楼层记录`, 'success');
+    else toast('无法生成安全预览；请检查酒馆正则引擎', 'error');
 }
 
 function summaryRecords() {
@@ -881,7 +945,9 @@ async function getSTModule() {
 
 function renderAll() {
     const st = sSync();
-    $('#miss-tag-input', $drawer).val(st.tag);    $('#miss-preset-select', $drawer).val(st.boundPreset);
+    $('#miss-tag-input', $drawer).val(st.tag);
+    $('#miss-remove-tags-input', $drawer).val(st.removeWrappedTags || '');
+    $('#miss-preset-select', $drawer).val(st.boundPreset);
     $('#miss-token-threshold', $drawer).val(st.tokenThreshold || '');
     $('#miss-floor-threshold', $drawer).val(st.floorThreshold || '');
     $('#miss-keep-floors', $drawer).val(st.keepVisibleFloors || '');
@@ -896,19 +962,37 @@ function renderAll() {
     updateTokens();
 }
 
-function renderRecords() {
+let recordRenderVersion = 0;
+async function renderRecords() {
+    const version = ++recordRenderVersion;
     const $list = $('#miss-records-list', $drawer);
     if (!$list.length) return;
-    const recs = allRecords().sort((a, b) => b.msgId - a.msgId);
+    const rawRecords = allRecords();
+    const chat = getContext()?.chat;
+    const mode = getStore().captureAllRecords ? 'unified' : 'tags';
+    let prepared;
+    try {
+        prepared = await prepareSummaryInputRecords(rawRecords, mode);
+    } catch (error) {
+        if (version === recordRenderVersion) {
+            $list.html(`<div class="miss-hint">无法生成安全预览：${escapeHtml(error?.message || error)}</div>`);
+            $('#miss-records-count', $drawer).text('0');
+        }
+        return null;
+    }
+    if (version !== recordRenderVersion || chat !== getContext()?.chat) return;
+    const rawById = new Map(rawRecords.map(record => [record.id, record]));
+    const recs = prepared.sort((a, b) => b.msgId - a.msgId);
     $('#miss-records-count', $drawer).text(String(recs.length));
-    if (!recs.length) { $list.html('<div class="miss-hint" style="padding:8px 4px;">暂无记录 — 点击「抓取无标签正文」或先设置摘要标签。</div>'); return; }
+    if (!recs.length) { $list.html('<div class="miss-hint" style="padding:8px 4px;">暂无可显示的纯净记录 — 点击「抓取无标签正文」或检查过滤规则。</div>'); return 0; }
     $list.html(recs.map(r => {
         const open = recordsOpen.has(r.id) ? ' open' : '';
         const badge = r.type === 'context' ? `楼层 ${r.floor} · 无标签正文` : `楼层 ${r.floor}`;
         const isEditing = editingId === r.id;
-        const body = isEditing ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(r.content)}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
+        const body = isEditing ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(rawById.get(r.id)?.content || '')}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
         return `<div class="miss-record${open}" data-id="${r.id}"><div class="miss-record-header"><span class="miss-record-title">${escapeHtml(r.title)}</span><span class="miss-record-badge">${badge}</span></div><div class="miss-record-body">${body}</div></div>`;
     }).join(''));
+    return recs.length;
 }
 
 // 渲染「已总结摘要」折叠栏
@@ -1257,6 +1341,13 @@ async function bindUi() {
         renderRecords();
     });
 
+    $('#miss-remove-tags-input', $drawer).on('change', function () {
+        sSync().removeWrappedTags = cleanTagList($(this).val());
+        $(this).val(sSync().removeWrappedTags);
+        saveSettings();
+        renderRecords();
+    });
+
     $('#miss-extract-btn', $drawer).on('click', async () => {
         // 先把输入框当前值清洗同步到设置（用户可能没触发 change 就点抓取）
         sSync().tag = cleanTagList($('#miss-tag-input', $drawer).val());
@@ -1316,7 +1407,27 @@ async function bindUi() {
     });
     $('#miss-full-chat-chk', $drawer).on('change', function () {
         sSync().sendFullChat = $(this).prop('checked'); saveSettings();
-        toast(sSync().sendFullChat ? '✅ 全文模式已开启：只发送当前未隐藏统一记录' : '已关闭全文模式', 'info');
+        $('#miss-send-preview', $drawer).hide();
+        toast(sSync().sendFullChat ? '✅ 全文模式已开启：发送未隐藏楼层的纯净正文与摘要' : '已关闭全文模式', 'info');
+    });
+    $('#miss-preview-btn', $drawer).on('click', async () => {
+        const $preview = $('#miss-send-preview', $drawer);
+        const previousPreset = currentPresetName();
+        try {
+            if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+            const mode = currentSummaryMode();
+            const lastId = getStore().lastMessageId ?? -1;
+            let records = getSummaryInputRecords(mode);
+            if (mode === 'tags') records = records.filter(record => record.msgId > lastId);
+            const prepared = await prepareSummaryInputRecords(records, mode);
+            $preview.val(prepared.length ? formatSummaryInput(prepared, mode) : '没有可发送的正文。').show();
+        } catch (error) {
+            $preview.val(`无法生成安全预览：${error?.message || error}`).show();
+        } finally {
+            if (previousPreset && sSync().boundPreset && previousPreset !== sSync().boundPreset) {
+                try { await applyPreset(previousPreset); } catch (error) { log('preview preset restore failed', error); }
+            }
+        }
     });
     $drawer.on('click', '#miss-capture-records-btn', () => captureAllRecords());
     $('#miss-summarize-btn', $drawer).on('click', () => runSummary(true));
@@ -1423,10 +1534,10 @@ async function reSummarizeAt(index) {
 
     try {
         const idSet = new Set(ids);
+        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
         const sourceRecords = await prepareSummaryInputRecords(
             getSummaryInputRecords(mode, true).filter(record => idSet.has(record.msgId)), mode);
         if (!sourceRecords.length) throw new Error('所选楼层没有当前模式可发送的正文，请检查摘要标签或开启全文。');
-        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
         const generated = await generateSummaryText(formatSummaryInput(sourceRecords, mode));
         const content = String(generated.text || '').trim();
         if (!content) throw new Error('API 未返回完整总结内容');
@@ -1490,6 +1601,7 @@ const debouncedAuto = debounce(() => {
 }, 1200);
 
 function onMessageChanged() {
+    renderRecords();
     debouncedAuto();
 }
 
@@ -1716,6 +1828,10 @@ async function runSummary(manual) {
             }
             return;
         }
+        if (st.boundPreset) {
+            const ok = await applyPreset(st.boundPreset);
+            if (!ok) toast(`⚠️ 未找到预设「${st.boundPreset}」，使用当前预设总结`);
+        }
         allRecords = await prepareSummaryInputRecords(allRecords, mode);
         if (!allRecords.length) {
             if (manual) toast('正文已被提示词正则全部隐藏，没有可发送的总结内容', 'warning');
@@ -1728,13 +1844,6 @@ async function runSummary(manual) {
         const chatText = formatSummaryInput(allRecords, mode);
         // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
-
-        if (st.boundPreset) {
-            const ok = await applyPreset(st.boundPreset);
-            if (!ok) {
-                toast(`⚠️ 未找到预设「${st.boundPreset}」，使用当前预设总结`);
-            }
-        }
 
         let text, via, fallbackError;
         try {
