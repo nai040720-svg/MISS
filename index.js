@@ -175,7 +175,10 @@ function defaultSettings() {
         summaryPrompt: '',  // 提示词完全由用户在「提示词」分类填写，插件不内置
         jailbreakPrompt: '',
         autoSummarize: true,
-        autoHideFloors: false,  // 功能4：总结过的楼层自动隐藏
+        autoHideFloors: false,
+        sendFullChat: false,
+        captureAllRecords: false,
+        capturedRecords: [],
         // 副API设置
         subApi: { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false, temperature: '' },
         subApiSaved: {},   // { name: {type, source, url, key, model, stream} }
@@ -386,63 +389,27 @@ function buildDrawer() {
 
                 <div class="miss-panel" id="miss-panel-memory">
                     <div class="miss-field">
-                        <div class="miss-collapse-header interactable" id="miss-records-toggle" tabindex="0">
-                            <b><i class="fa-solid fa-scroll"></i> 记录（标签抓取）</b>
-                            <i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i>
-                        </div>
-                        <div class="miss-collapse-body" id="miss-records-body" style="display:none;">
-                            <div class="miss-records-scroll">
-                                <div id="miss-records-list"></div>
-                            </div>
-                        </div>
+                        <button id="miss-capture-records-btn" class="miss-btn" style="width:100%;"><i class="fa-solid fa-download"></i> 抓取无标签正文</button>
+                        <div class="miss-hint">按楼层统一整理：有摘要标签的楼层只取标签正文；无标签楼层取整条正文。显示倒序，发送给 AI 时正序。</div>
                     </div>
-
                     <div class="miss-field">
-                        <div class="miss-collapse-header interactable" id="miss-summaries-toggle" tabindex="0">
-                            <b><i class="fa-solid fa-brain"></i> 已总结摘要（<span id="miss-summaries-count">0</span>）</b>
-                            <i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i>
-                        </div>
-                        <div class="miss-collapse-body" id="miss-summaries-body" style="display:none;">
-                            <div class="miss-records-scroll">
-                                <div id="miss-summaries-list"></div>
-                            </div>
-                            <div class="miss-inline-row" style="margin-top:6px;">
-                                <button id="miss-resummarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-rotate-right"></i> 重新总结</button>
-                            </div>
-                            <div class="miss-hint">点击「重新总结」将把当前聊天中所有摘要标签抓取的完整正文重新交给 AI 总结一遍。</div>
-                        </div>
+                        <div class="miss-collapse-header interactable" id="miss-records-toggle" tabindex="0"><b><i class="fa-solid fa-scroll"></i> 记录（统一楼层记录）<span id="miss-records-count">0</span></b><i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i></div>
+                        <div class="miss-collapse-body" id="miss-records-body" style="display:none;"><div class="miss-records-scroll"><div id="miss-records-list"></div></div></div>
                     </div>
-
                     <div class="miss-field">
-                        <label><i class="fa-solid fa-gauge-high"></i> 总结设置</label>
-                        <div class="miss-token-box">
-                            <div class="miss-token-label">当前总 Token（预设 + 聊天记录 + 提示词）</div>
-                            <div class="miss-token-value"><span id="miss-token-display">0</span></div>
+                        <div class="miss-collapse-header interactable" id="miss-summaries-toggle" tabindex="0"><b><i class="fa-solid fa-brain"></i> 大总结内容（<span id="miss-summaries-count">0</span>） <button id="miss-delete-summaries-btn" class="miss-btn danger" style="float:right;" title="删除全部大总结内容"><i class="fa-solid fa-trash"></i> 删除</button></b><i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i></div>
+                        <div class="miss-collapse-body" id="miss-summaries-body" style="display:none;"><div class="miss-records-scroll"><div id="miss-summaries-list"></div></div><div class="miss-inline-row" style="margin-top:6px;"><button id="miss-resummarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-rotate-right"></i> 重新总结</button></div><div class="miss-hint">重新总结发送当前所有未隐藏统一记录；删除只删除大总结及世界书条目。</div></div>
+                    </div>
+                    <div class="miss-field">
+                        <div class="miss-collapse-header interactable" id="miss-summary-settings-toggle" tabindex="0"><b><i class="fa-solid fa-gauge-high"></i> 总结设置</b><i class="fa-solid fa-circle-chevron-down miss-collapse-icon"></i></div>
+                        <div class="miss-collapse-body" id="miss-summary-settings-body" style="display:none;">
+                            <div class="miss-token-box"><div class="miss-token-label">当前总 Token（预设 + 聊天记录 + 提示词）</div><div class="miss-token-value"><span id="miss-token-display">0</span></div></div>
+                            <div class="miss-grid"><div><label for="miss-token-threshold">Token 总结</label><input id="miss-token-threshold" class="miss-input" type="number" min="0" placeholder="0=关闭"></div><div><label for="miss-floor-threshold">楼层总结</label><input id="miss-floor-threshold" class="miss-input" type="number" min="0" placeholder="0=关闭"></div><div><label for="miss-keep-floors">隐藏楼层（保留最近 N 个角色楼）</label><input id="miss-keep-floors" class="miss-input" type="number" min="0" placeholder="0=关闭"></div></div>
                         </div>
-                        <div class="miss-grid">
-                            <div>
-                                <label for="miss-token-threshold">Token 总结</label>
-                                <input id="miss-token-threshold" class="miss-input" type="number" min="0" placeholder="0=关闭">
-                            </div>
-                            <div>
-                                <label for="miss-floor-threshold">楼层总结</label>
-                                <input id="miss-floor-threshold" class="miss-input" type="number" min="0" placeholder="0=关闭">
-                            </div>
-                            <div>
-                                <label for="miss-keep-floors" title="保留最近 N 个角色楼层（不含用户楼层），之前的所有楼层（包括用户楼层）全部隐藏，只注入摘要内容">隐藏楼层（保留最近 N 个角色楼）</label>
-                                <input id="miss-keep-floors" class="miss-input" type="number" min="0" placeholder="0=关闭">
-                            </div>
-                        </div>
-                        <label class="miss-check" title="勾选后：当新楼层满「楼层总结」楼，或总 Token 满「Token 总结」时，插件自动调用 AI 总结一次，无需手动点按钮">
-                            <input id="miss-auto-chk" type="checkbox"> 自动总结（达到上方阈值时插件自动触发，不勾选则只能手动点「立即总结」）
-                        </label>
-                        <label class="miss-check" title="勾选后：总结完成后只保留最近 1 楼，其余楼层（包括用户输入的楼层）全部隐藏，且不注入任何摘要——AI 只看到最近 1 楼 + 世界书">
-                            <input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏楼层（总结后只保留最近 1 楼，其余含用户楼层全部隐藏，不注入摘要）
-                        </label>
-                        <div class="miss-inline-row" style="margin-top:6px;">
-                            <button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button>
-                        </div>
-                        <div class="miss-hint">总结针对当前打开的角色卡聊天记录，更换角色后 Token 数与记录会实时更新。<b>隐藏楼层N</b>：保留最近 N 个<b>角色楼层</b>（不含用户楼层），之前的所有楼层（<b>包括用户楼层</b>）全部隐藏，只注入摘要；<b>自动隐藏</b>：总结后只保留最近 1 楼，其余（含用户楼层）全部隐藏，<b>什么都不注入</b>（摘要也隐藏，AI 只看到最近 1 楼+世界书）。总结/破限提示词在「提示词」分类中设置。</div>
+                        <label class="miss-check"><input id="miss-auto-chk" type="checkbox"> 自动总结（达到阈值时自动触发）</label>
+                        <label class="miss-check"><input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏已总结楼层</label>
+                        <label class="miss-check" title="只发送当前未隐藏楼层；已隐藏楼层视为已经总结过"><input id="miss-full-chat-chk" type="checkbox"> 总结时发送全文（当前未隐藏聊天正文 + 摘要正文）</label>
+                        <div class="miss-inline-row" style="margin-top:6px;"><button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button></div>
                     </div>
                 </div>
 
@@ -633,6 +600,9 @@ function getStore() {
     if (!st.hiddenMessageIds || typeof st.hiddenMessageIds !== 'object') {
         st.hiddenMessageIds = {};
     }
+    st.sendFullChat = !!st.sendFullChat;
+    st.captureAllRecords = !!st.captureAllRecords;
+    if (!Array.isArray(st.capturedRecords)) st.capturedRecords = [];
     return st;
 }
 
@@ -697,23 +667,63 @@ function extractRecords() {
                 continue;
             }
             const content = parts.join('\n');
-            const title = (content.split('\n')[0] || '').trim().slice(0, 24) || `楼层 ${idx + 1}`;
-            records.push({ id: `m${idx}_${tag}`, type: 'extract', title, content, floor: idx + 1, msgId: idx, tag });
+            const title = (content.split('\n')[0] || '').trim().slice(0, 24) || `楼层 ${idx + 1}`;            records.push({ id: `m${idx}_${tag}`, type: 'extract', title, content, floor: idx + 1, msgId: idx, tag });
         }
     });
     return records;
 }
 
-function allRecords() {
-    // 「记录」区仅显示标签抓取的内容（已总结摘要单独在折叠栏显示）
-    return extractRecords();
+function buildUnifiedRecords() {
+    const ctx = getContext();
+    if (!Array.isArray(ctx?.chat)) return [];
+    const rawTags = String(sSync().tag || '').trim();
+    const tags = [...new Set(rawTags.split(/[,，、]/).map(t => cleanTagName(t)).filter(Boolean))];
+    const records = [];
+    ctx.chat.forEach((m, idx) => {
+        if (!m || typeof m.mes !== 'string' || m.is_system) return;
+        const tagged = [];
+        for (const tag of tags) {
+            const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
+            let mm;
+            while ((mm = re.exec(m.mes)) !== null) {
+                const t = String(mm[1] || '').trim();
+                if (t) tagged.push(t);
+            }
+        }
+        const content = tagged.length ? tagged.join('\\n') : String(m.mes).trim();
+        if (!content) return;
+        records.push({
+            id: `m${idx}_${tagged.length ? 'tag' : 'context'}`,
+            type: tagged.length ? 'extract' : 'context',
+            title: tagged.length ? (content.split('\\n')[0] || `楼层 ${idx + 1}`).slice(0, 24) : `楼层 ${idx + 1}（无标签正文）`,
+            content, msgId: idx, floor: idx + 1, sourceMessage: m.mes
+        });
+    });
+    return records;
 }
-
-// 总结输入只允许使用摘要标签内的完整正文，绝不使用 title（title 仅用于界面显示）
+function isRecordHidden(record) {
+    const st = getStore();
+    return !!st.hiddenMessageIds?.[String(record.msgId)] || !!st.hiddenMessageIds?.[record.msgId];
+}
+function allRecords() {
+    return (sSync().captureAllRecords ? buildUnifiedRecords() : extractRecords());
+}
+function getSummarySourceRecords() {
+    return buildUnifiedRecords().filter(r => !isRecordHidden(r));
+}
+function getSummaryInputRecords() {
+    return getSummarySourceRecords().sort((a, b) => a.msgId - b.msgId);
+}
 function getTaggedContents(records = extractRecords()) {
-    return records
-        .map(record => String(record?.content || '').trim())
-        .filter(Boolean);
+    return records.map(record => String(record?.content || '').trim()).filter(Boolean);
+}
+function captureAllRecords() {
+    const st = getStore();
+    st.captureAllRecords = true;
+    st.capturedRecords = buildUnifiedRecords();
+    saveMetadata();
+    renderRecords();
+    toast(`✅ 已抓取 ${st.capturedRecords.length} 条统一记录（标签正文 + 无标签正文）`, 'success');
 }
 
 function summaryRecords() {
@@ -755,6 +765,7 @@ function renderAll() {
     $('#miss-jailbreak-prompt', $drawer).val(st.jailbreakPrompt || '');
     $('#miss-auto-chk', $drawer).prop('checked', !!st.autoSummarize);
     $('#miss-hide-floors-chk', $drawer).prop('checked', !!st.autoHideFloors);
+    $('#miss-full-chat-chk', $drawer).prop('checked', !!st.sendFullChat);
     renderRecords();
     renderSummaries();
     updateTokens();
@@ -762,37 +773,17 @@ function renderAll() {
 
 function renderRecords() {
     const $list = $('#miss-records-list', $drawer);
-    if (!$list.length) {
-        return;
-    }
-    const recs = allRecords();
-    if (!recs.length) {
-        $list.html('<div class="miss-hint" style="padding:8px 4px;">暂无记录 — 在「初始设置」填写摘要标签后点击抓取，或等待自动总结。</div>');
-        return;
-    }
-    const html = recs.map(r => {
+    if (!$list.length) return;
+    const recs = allRecords().sort((a, b) => b.msgId - a.msgId);
+    $('#miss-records-count', $drawer).text(String(recs.length));
+    if (!recs.length) { $list.html('<div class="miss-hint" style="padding:8px 4px;">暂无记录 — 点击「抓取无标签正文」或先设置摘要标签。</div>'); return; }
+    $list.html(recs.map(r => {
         const open = recordsOpen.has(r.id) ? ' open' : '';
-        const badge = r.type === 'summary' ? 'AI摘要' : `楼层 ${r.floor}`;
+        const badge = r.type === 'context' ? '无标签正文' : `楼层 ${r.floor}`;
         const isEditing = editingId === r.id;
-        const body = isEditing
-            ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(r.content)}</textarea>
-               <div class="miss-record-editbar">
-                   <button class="miss-btn" data-act="cancel-edit">取消</button>
-                   <button class="miss-btn primary" data-act="save-edit"><i class="fa-solid fa-check"></i> 保存修改</button>
-               </div>`
-            : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div>
-               <div class="miss-record-editbar">
-                   <button class="miss-btn" data-act="start-edit"><i class="fa-solid fa-pen"></i> 编辑模式</button>
-               </div>`;
-        return `<div class="miss-record${open}" data-id="${r.id}">
-            <div class="miss-record-header">
-                <span class="miss-record-title">${escapeHtml(r.title)}</span>
-                <span class="miss-record-badge">${badge}</span>
-            </div>
-            <div class="miss-record-body">${body}</div>
-        </div>`;
-    }).join('');
-    $list.html(html);
+        const body = isEditing ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(r.content)}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
+        return `<div class="miss-record${open}" data-id="${r.id}"><div class="miss-record-header"><span class="miss-record-title">${escapeHtml(r.title)}</span><span class="miss-record-badge">${badge}</span></div><div class="miss-record-body">${body}</div></div>`;
+    }).join(''));
 }
 
 // 渲染「已总结摘要」折叠栏
@@ -1049,6 +1040,21 @@ function currentPresetName() {
     return null;
 }
 
+async function deleteSummaryWorldInfoEntries() {
+    try {
+        const ctx = getContext(); const name = ctx?.chatMetadata?.[MODULE]?.wiName;
+        if (!name) return; const mod = await getSTModule(); const world = await mod?.loadWorldInfo?.(name);
+        if (!world?.entries) return;
+        for (const [key, entry] of Object.entries(world.entries)) if (String(entry?.comment || '').startsWith('Miss总结')) delete world.entries[key];
+        await mod?.saveWorldInfo?.(name, world);
+    } catch (e) { log('delete summary world info failed', e); }
+}
+async function deleteAllSummaries() {
+    if (!window.confirm('确定删除全部大总结内容及其世界书条目吗？聊天原文和楼层记录不会删除。')) return;
+    const st = getStore(); st.summaries = []; st.lastMessageId = -1;
+    await saveMetadata(); await deleteSummaryWorldInfoEntries(); renderSummaries();
+    toast('✅ 已删除全部大总结内容', 'success');
+}
 // ---------------- 事件 ----------------
 
 async function bindUi() {
@@ -1125,11 +1131,14 @@ async function bindUi() {
     $('#miss-hide-floors-chk', $drawer).on('change', function () {
         sSync().autoHideFloors = $(this).prop('checked');
         saveSettings();
-        toast(sSync().autoHideFloors
-            ? '✅ 自动隐藏已开启：总结过的楼层将不再发送给 AI'
-            : '自动隐藏已关闭', 'info');
+        toast(sSync().autoHideFloors ? '✅ 自动隐藏已开启：总结过的楼层将不再发送给 AI' : '自动隐藏已关闭', 'info');
     });
-
+    $('#miss-full-chat-chk', $drawer).on('change', function () {
+        sSync().sendFullChat = $(this).prop('checked'); saveSettings();
+        toast(sSync().sendFullChat ? '✅ 全文模式已开启：只发送当前未隐藏统一记录' : '已关闭全文模式', 'info');
+    });
+    $drawer.on('click', '#miss-capture-records-btn', () => captureAllRecords());
+    $drawer.on('click', '#miss-delete-summaries-btn', e => { e.stopPropagation(); deleteAllSummaries(); });
     $('#miss-summarize-btn', $drawer).on('click', () => runSummary(true));
 
     // 已总结摘要折叠栏：展开/收起
@@ -1141,6 +1150,10 @@ async function bindUi() {
     // 记录（标签抓取）折叠栏：展开/收起（功能2）
     $drawer.on('click', '#miss-records-toggle', function () {
         $('#miss-records-body', $drawer).slideToggle(150);
+        $(this).find('.miss-collapse-icon').toggleClass('open');
+    });
+    $drawer.on('click', '#miss-summary-settings-toggle', function () {
+        $('#miss-summary-settings-body', $drawer).slideToggle(150);
         $(this).find('.miss-collapse-icon').toggleClass('open');
     });
 
@@ -1197,9 +1210,9 @@ async function bindUi() {
 async function reSummarizeAll() {
     const store = getStore();
     const summaries = Array.isArray(store.summaries) ? store.summaries : [];
-    // 重新总结直接读取当前聊天中的所有摘要标签正文，不依赖旧 AI 摘要是否存在
-    const taggedTexts = getTaggedContents();
-    if (!taggedTexts.length) {
+    // 重新总结读取当前未隐藏的统一记录，不依赖旧 AI 摘要标题。
+    const sourceRecords = getSummaryInputRecords();
+    if (!sourceRecords.length) {
         toast('没有可重新总结的摘要标签内容', 'warning');
         return;
     }
@@ -1210,8 +1223,7 @@ async function reSummarizeAll() {
     const prevPreset = currentPresetName();
     try {
         const st = sSync();
-        // 只发送摘要标签抓取的完整正文；title 仅用于界面显示
-        const chatText = taggedTexts.join('\n\n');
+        const chatText = sourceRecords.map(r => r.content).join('\n\n');
 
         let text, via;
         try {
@@ -1397,8 +1409,7 @@ async function onGeneration() {
         await saveMetadata();
     }
 
-    try {
-        // 注入摘要规则（功能4 最终版）：
+    try {        // 注入摘要规则（功能4 最终版）：
         // - 自动隐藏开启 → 不注入摘要（什么也不给）
         // - 自定义隐藏楼层 → 注入摘要（补全被隐藏楼层的内容）
         const injectEnabled = !st.autoHideFloors;
@@ -1487,42 +1498,10 @@ async function runSummary(manual) {
         const store = getStore();
         const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
 
-        // user 内容 = 摘要标签抓取的内容（上次总结点之后的楼层，不含隐藏楼层）
-        // 隐藏楼层：自动隐藏模式下最新摘要 upTo 之后的不可总结部分跳过；
-        // 自定义隐藏楼层 N = 最近 N 个角色楼层保留，更早的楼层不参与总结
-        let allRecords = extractRecords();
-        // 只总结「被隐藏楼层」里的摘要抓取（保留区楼层原文可见，无需进摘要）
-        if (st.autoHideFloors) {
-            // 自动隐藏：隐藏范围 = 最新摘要 upTo 之后（等待总结确认中），只取该范围
-            let maxUpTo = -1;
-            for (const s of store.summaries) {
-                if (typeof s.upTo === 'number' && s.upTo > maxUpTo) {
-                    maxUpTo = s.upTo;
-                }
-            }
-            allRecords = allRecords.filter(r => r.msgId > maxUpTo);
-        } else {
-            const keep = Number(st.keepVisibleFloors) || 0;
-            if (keep > 0) {
-                // 自定义隐藏 N：隐藏区 = 最近第 N 个角色楼之前 → 只取该范围的抓取
-                let counted = 0;
-                let keepStartIdx = chat.length;
-                for (let i = chat.length - 1; i >= 0; i--) {
-                    const m = chat[i];
-                    if (m && !m.is_user && !m.is_system) {
-                        counted++;
-                        keepStartIdx = i;
-                        if (counted >= keep) {
-                            break;
-                        }
-                    }
-                }
-                allRecords = allRecords.filter(r => r.msgId < keepStartIdx);
-            }
-        }
-        // 只取上次总结点之后的新抓取
-        allRecords = allRecords.filter(r => r.msgId > lastId);
-
+        // 统一记录按楼层升序发送；隐藏楼层始终排除。
+        let allRecords = getSummaryInputRecords();
+        const useFull = !!st.sendFullChat || !!st.captureAllRecords;
+        if (!useFull) allRecords = allRecords.filter(r => r.msgId > lastId);
         if (!allRecords.length) {
             if (manual) {
                 toast('没有新的摘要内容需要总结', 'info');
@@ -1532,9 +1511,8 @@ async function runSummary(manual) {
         // 本次实际总结覆盖到的最后一楼（用于下次总结起点与隐藏范围）
         const lastSummarizedFloor = Math.max(...allRecords.map(r => r.msgId));
 
-        // 只发送摘要标签抓取的完整正文；title 仅用于界面显示
-        const taggedTexts = getTaggedContents(allRecords);
-        const chatText = taggedTexts.join('\n\n');
+        // 只发送正文，标题仅用于界面显示。
+        const chatText = allRecords.map(r => r.content).join('\n\n');
         // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
 
@@ -1839,9 +1817,12 @@ async function saveEdit(rec, newText) {
     if (rec.type === 'extract') {
         const m = ctx.chat?.[rec.msgId];
         if (m && typeof m.mes === 'string' && m.mes.includes(rec.content)) {
-            m.mes = m.mes.split(rec.content).join(newText);
+            m.mes = m.mes.replace(rec.content, newText);
             ctx.saveChat?.();
         }
+    } else if (rec.type === 'context') {
+        const m = ctx.chat?.[rec.msgId];
+        if (m) { m.mes = newText; ctx.saveChat?.(); }
     } else if (rec.entry) {
         rec.entry.content = newText;
         await saveMetadata();
@@ -2097,108 +2078,7 @@ async function generateSummaryText(chatText) {
     }
     if (typeof out !== 'string' || !out.trim()) {
         try {
-            out = await ctx.generateQuietPrompt(prompt, false, false, null, null, 1024);
-        } catch (e) {
-            log('positional generateQuietPrompt failed', e);
-        }
-    }
-    if (typeof out !== 'string' || !out.trim()) {
-        throw new Error('总结生成失败（模型未返回内容）');
-    }
-    return { text: out.trim(), via: 'main' };
-}
-
-// ---------------- 副API UI ----------------
-
-function renderSubApi() {
-    if (!$drawer || !$drawer.length) {
-        return;
-    }
-    const st = sSync();
-    const cfg = st.subApi || {};
-    $('#miss-subapi-type', $drawer).val(cfg.type || 'openai');
-    $('#miss-subapi-source', $drawer).val(cfg.source || 'custom');
-    $('#miss-subapi-url', $drawer).val(cfg.url || '');
-    $('#miss-subapi-key', $drawer).val(cfg.key || '');
-    $('#miss-subapi-model', $drawer).val(cfg.model || '');
-    $('#miss-subapi-stream-chk', $drawer).prop('checked', !!cfg.stream);
-    $('#miss-subapi-temperature', $drawer).val(cfg.temperature ?? '');
-    $('#miss-subapi-source-row', $drawer).toggle(String(cfg.type || 'openai') === 'openai');
-    // 已保存列表
-    const names = Object.keys(st.subApiSaved || {});
-    const $sel = $('#miss-subapi-saved-select', $drawer);
-    $sel.empty().append('<option value="">— 选择已保存的副API —</option>');
-    for (const n of names) {
-        $sel.append($('<option></option>').val(n).text(n));
-    }
-    $sel.val(st.subApiActive && names.includes(st.subApiActive) ? st.subApiActive : '');
-    // 状态行
-    const $status = $('#miss-subapi-status', $drawer);
-    if (cfg.connected) {
-        $status.html(`<span style="color:var(--green,#4caf50);">● 已连接</span> ${escapeHtml(cfg.model || cfg.url || '')}（总结时将使用此副API）`);
-    } else {
-        $status.text('未连接。总结时如已填写副API将使用它生成摘要；未填写则使用酒馆当前连接的API。');
-    }
-}
-
-function readSubApiForm() {
-    const st = sSync();
-    st.subApi = st.subApi || { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false };
-    st.subApi.type = 'openai';
-    st.subApi.source = String($('#miss-subapi-source', $drawer).val() || 'custom');
-    st.subApi.url = normalizeSubUrl($('#miss-subapi-url', $drawer).val());
-    st.subApi.key = String($('#miss-subapi-key', $drawer).val() || '');
-    st.subApi.model = String($('#miss-subapi-model', $drawer).val() || '').trim();
-    st.subApi.stream = $('#miss-subapi-stream-chk', $drawer).prop('checked');
-    const rawTemp = $('#miss-subapi-temperature', $drawer).val();
-    st.subApi.temperature = rawTemp === '' || rawTemp == null ? '' : Math.min(2, Math.max(0, Number(rawTemp)));
-    return st.subApi;
-}
-
-function bindSubApiUi() {
-    // 折叠条展开/收起
-    $drawer.on('click', '#miss-subapi-toggle', function () {
-        $('#miss-subapi-body', $drawer).slideToggle(150);
-        $(this).find('.miss-collapse-icon').toggleClass('open');
-    });
-    $drawer.on('click', '#miss-subapi-saved-toggle', function () {
-        $('#miss-subapi-saved-body', $drawer).slideToggle(150);
-        $(this).find('.miss-collapse-icon').toggleClass('open');
-    });
-
-    $drawer.on('change', '#miss-subapi-type', function () {
-        readSubApiForm();
-        saveSettings();
-        renderSubApi();
-    });
-    $drawer.on('change', '#miss-subapi-source, #miss-subapi-url, #miss-subapi-key, #miss-subapi-model, #miss-subapi-temperature', function () {
-        readSubApiForm();
-        saveSettings();
-    });
-    $drawer.on('change', '#miss-subapi-stream-chk', function () {
-        readSubApiForm();
-        saveSettings();
-        toast(sSync().subApi.stream ? '✅ 总结流式传输已开启' : '总结流式传输已关闭');
-    });
-
-    $drawer.on('click', '#miss-subapi-connect-btn', async function () {
-        const $btn = $(this);
-        $btn.prop('disabled', true);
-        readSubApiForm();
-        const st = sSync();
-        st.subApi.connected = false;
-        saveSettings();
-        renderSubApi();
-        try {
-            const r = await subApiTest();
-            if (r.ok) {
-                sSync().subApi.connected = true;
-                saveSettings();
-                renderSubApi();
-                toast(`✅ 副API连接成功：${r.text}`);
-            } else {
-                renderSubApi();
-                toast(`❌ 连接失败：${r.error}`);
+            out = await ctx.generateQuietPrompt(prompt, false, false, null, null, 1024);                toast(`❌ 连接失败：${r.error}`);
             }
         } finally {
             $btn.prop('disabled', false);
