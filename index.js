@@ -396,7 +396,7 @@ function buildDrawer() {
                             <div class="miss-inline-row" style="margin-top:6px;">
                                 <button id="miss-resummarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-rotate-right"></i> 重新总结</button>
                             </div>
-                            <div class="miss-hint">点击「重新总结」将把之前所有已总结的摘要重新交给 AI 总结一遍，生成一条新的合并摘要。</div>
+                            <div class="miss-hint">点击「重新总结」将把当前聊天中所有摘要标签抓取的完整正文重新交给 AI 总结一遍。</div>
                         </div>
                     </div>
 
