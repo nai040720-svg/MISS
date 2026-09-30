@@ -8,6 +8,7 @@ new vm.Script(source, { filename: 'index.js' });
 
 let ready;
 let menuInserted = false;
+const rendered = {};
 const timers = [];
 const chat = [
     { mes: '开场白' },
@@ -26,7 +27,11 @@ const jquery = arg => {
         ready = arg;
         return;
     }
-    return { on() { return this; }, length: 1 };
+    return {
+        on() { return this; }, length: 1,
+        html(value) { if (value !== undefined) rendered[arg] = value; return this; },
+        text(value) { if (value !== undefined) rendered[arg] = value; return this; },
+    };
 };
 const sandbox = {
     console: { log() {}, error() {} },
@@ -50,6 +55,13 @@ assert.equal(unified.length, 4);
 assert.equal(unified[1].content, '一号摘要\n另一个标签');
 assert.equal(unified[2].content, '无标签正文');
 assert.equal(unified[1].msgId, 1);
+assert.equal(unified[2].title, '无标签正文');
+vm.runInContext('getStore().captureAllRecords = true; _settings.sendFullChat = false', sandbox);
+assert.deepEqual(Array.from(vm.runInContext('allRecords()', sandbox), r => r.msgId), [0, 1, 2, 3]);
+assert.equal(vm.runInContext('currentSummaryMode()', sandbox), 'unified');
+vm.runInContext('renderRecords()', sandbox);
+assert.match(rendered['#miss-records-list'], /无标签正文<\/span><span class="miss-record-badge">楼层 3 · 无标签正文/);
+vm.runInContext('_settings.sendFullChat = true', sandbox);
 
 const sent = vm.runInContext('getSummaryInputRecords()', sandbox);
 assert.deepEqual(Array.from(sent, r => r.msgId), [0, 1, 2]);
@@ -66,6 +78,28 @@ ready();
 assert.equal(menuInserted, true, 'settings failure must not block menu insertion');
 
 (async () => {
+    vm.runInContext(`
+        getPromptRegexEngine = async () => ({
+            getRegexedString: (input, placement, options) => {
+                if (!options.isPrompt) throw new Error('prompt flag missing');
+                globalThis.regexCalls = (globalThis.regexCalls || []).concat([{ placement, depth: options.depth }]);
+                return input.replace(/秘密内容/g, '');
+            },
+        });
+    `, sandbox);
+    chat[1].mes += '秘密内容';
+    chat[2].mes += '秘密内容';
+    const filteredFull = await vm.runInContext("prepareSummaryInputRecords(getSummaryInputRecords('full'), 'full')", sandbox);
+    assert.equal(filteredFull.some(r => r.content.includes('秘密内容')), false);
+    assert.equal(chat[1].mes.includes('秘密内容'), true, 'stored chat must stay unchanged');
+    assert.equal(filteredFull.find(r => r.msgId === 1).content.includes('剧情片段'), true);
+    const filteredUnified = await vm.runInContext("prepareSummaryInputRecords(getSummaryInputRecords('unified'), 'unified')", sandbox);
+    assert.equal(filteredUnified.find(r => r.msgId === 2).content, '无标签正文');
+    assert.equal(filteredUnified.find(r => r.msgId === 1).content.includes('剧情片段'), false);
+    assert.equal(sandbox.regexCalls[0].depth, 2);
+    vm.runInContext('getPromptRegexEngine = async () => { throw new Error("正则引擎不可用") }', sandbox);
+    await assert.rejects(vm.runInContext("prepareSummaryInputRecords(getSummaryInputRecords('full'), 'full')", sandbox), /正则引擎不可用/);
+    vm.runInContext('getPromptRegexEngine = async () => ({ getRegexedString: input => input.replace(/秘密内容/g, "") })', sandbox);
     context.chatMetadata.missSummary.summaries = [{
         title: '旧总结', content: '旧内容', sourceMsgIds: [3], from: 3, upTo: 3,
     }];
@@ -150,6 +184,5 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     vm.runInContext("popupConfirm = async message => { globalThis.popupText = message }; toast = () => {}", sandbox);
     await vm.runInContext("showSummaryFailure(new Error('连接中断'), '总结')", sandbox);
     assert.equal(sandbox.popupText.includes('连接中断'), true);
-    console.log('PASS: syntax, full chat, per-summary redo/delete, hidden state, API interruption popup');
+    console.log('PASS: syntax, capture state/title/floor, prompt regex in full/unified, fail-closed, redo/delete, hidden state, API interruption popup');
 })().catch(error => { console.error(error); process.exitCode = 1; });
-
