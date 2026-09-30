@@ -697,8 +697,7 @@ function buildUnifiedRecords() {
             type: tagged.length ? 'extract' : 'context',
             title: tagged.length ? (content.split('\n')[0] || `楼层 ${idx + 1}`).slice(0, 24) : `楼层 ${idx + 1}（无标签正文）`,
             content, msgId: idx, floor: idx + 1, sourceMessage: m.mes
-        });
-    });
+        });    });
     return records;
 }
 function isRecordHidden(record) {
@@ -709,7 +708,9 @@ function allRecords() {
     return (sSync().captureAllRecords ? buildUnifiedRecords() : extractRecords());
 }
 function getSummarySourceRecords() {
-    return buildUnifiedRecords().filter(r => !isRecordHidden(r));
+    const st = sSync();
+    const records = (st.sendFullChat || st.captureAllRecords) ? buildUnifiedRecords() : extractRecords();
+    return records.filter(r => !isRecordHidden(r));
 }
 function getSummaryInputRecords() {
     return getSummarySourceRecords().sort((a, b) => a.msgId - b.msgId);
@@ -1397,8 +1398,7 @@ async function onGeneration() {
             const m = chat[i];
             if (m && !m.is_system) {
                 hideMessageByPlugin(m, i, store);
-                changed = true;
-            }
+                changed = true;            }
         }
         if (changed) {
             log(`自定义隐藏楼层：保留最近 ${keep} 个角色楼层及其间的用户楼层（第 ${keepStartIdx} 楼起），之前全部隐藏（只显示摘要）`);
@@ -2097,108 +2097,7 @@ async function generateSummaryText(chatText) {
                 saveSettings();
                 renderSubApi();
             }
-        } finally {
-            $btn.prop('disabled', false);
-        }
-    });
-
-    $drawer.on('click', '#miss-subapi-models-btn', async function () {
-        const $btn = $(this);
-        $btn.prop('disabled', true);
-        readSubApiForm();
-        try {
-            const r = await subApiFetchModels();
-            if (!r.ok) {
-                toast(`❌ 拉取模型失败：${r.error}`);
-                return;
-            }
-            if (!r.models?.length) {
-                toast('未拉取到模型列表');
-                return;
-            }
-            const $input = $('#miss-subapi-model', $drawer);
-            const current = String($input.val() || '');
-            // 拉取到的模型替换为下拉选择（保留手输能力：双击还原为 input）
-            const $sel = $('<select id="miss-subapi-model" class="miss-input"></select>');
-            for (const m of r.models) {
-                $sel.append($('<option></option>').val(m).text(m));
-            }
-            $sel.val(current && r.models.includes(current) ? current : r.models[0]);
-            $input.replaceWith($sel);
-            readSubApiForm();
-            saveSettings();
-            toast(`✅ 已拉取 ${r.models.length} 个模型`);
-            // 换回文本框：双击下拉框
-            $sel.on('dblclick', () => {
-                const v = String($sel.val() || '');
-                const $inp = $('<input id="miss-subapi-model" class="miss-input" type="text" placeholder="模型名，或点右侧拉取">').val(v);
-                $sel.replaceWith($inp);
-            });
-        } finally {
-            $btn.prop('disabled', false);
-        }
-    });
-
-    // 保存当前副API配置
-    $drawer.on('click', '#miss-subapi-save-btn', async () => {
-        const name = String($('#miss-subapi-save-name', $drawer).val() || '').trim()
-            || autoSubApiName();
-        const st = sSync();
-        st.subApiSaved = st.subApiSaved || {};
-        readSubApiForm();
-        st.subApiSaved[name] = {
-            type: st.subApi.type,
-            source: st.subApi.source,
-            url: st.subApi.url,
-            key: st.subApi.key,
-            model: st.subApi.model,
-            connected: !!st.subApi.connected,
-            stream: !!st.subApi.stream,
-            temperature: st.subApi.temperature ?? '',
-            savedAt: Date.now(),
-        };
-        st.subApiActive = name;
-        saveSettings();
-        $('#miss-subapi-save-name', $drawer).val('');
-        renderSubApi();
-        toast(`✅ 已保存副API「${name}」并启用`);
-    });
-
-    // 切换副API
-    $drawer.on('change', '#miss-subapi-saved-select', async function () {
-        const name = String($(this).val() || '');
-        if (!name) {
-            return;
-        }
-        await applySubApiSnapshot(name);
-    });
-
-    // 删除所选副API
-    $drawer.on('click', '#miss-subapi-saved-delete', () => {
-        const st = sSync();
-        const name = String($('#miss-subapi-saved-select', $drawer).val() || '');
-        if (!name || !st.subApiSaved?.[name]) {
-            toast('请先在下方选择栏选择一个已保存的副API');
-            return;
-        }
-        delete st.subApiSaved[name];
-        if (st.subApiActive === name) {
-            st.subApiActive = '';
-        }
-        saveSettings();
-        renderSubApi();
-        toast(`已删除副API「${name}」`);
-    });
-}
-
-function autoSubApiName() {
-    const st = sSync();
-    const taken = new Set(Object.keys(st.subApiSaved || {}));
-    for (let i = 1; i <= 10; i++) {
-        if (!taken.has(String(i))) {
-            return String(i);
-        }
-    }
+        } finally {    }
     let n = 11;
     while (taken.has(String(n))) {
         n++;
