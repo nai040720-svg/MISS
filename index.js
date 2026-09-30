@@ -213,6 +213,10 @@ let busy = false;
 const recordsOpen = new Set();
 let editingId = null;
 let $drawer = null;
+let initialized = false;
+let uiBound = false;
+let subApiUiBound = false;
+let eventsBound = false;
 
 console.log('[MissSummary] module evaluated');
 
@@ -226,6 +230,9 @@ jQuery(() => {
 });
 
 async function init() {
+    if (initialized) {
+        return;
+    }
     const ctx = getContext();
     if (!ctx) {
         log('context not ready, skip');
@@ -238,8 +245,14 @@ async function init() {
     log('step 3/6: menu button');
     addMenuButton();
     log('step 4/6: bind ui');
-    await bindUi();
-    bindSubApiUi();
+    if (!uiBound) {
+        await bindUi();
+        uiBound = true;
+    }
+    if (!subApiUiBound) {
+        bindSubApiUi();
+        subApiUiBound = true;
+    }
     renderSubApi();
     log('step 5/6: presets');
     await refreshPresets();
@@ -248,18 +261,20 @@ async function init() {
 
     const es = await getEventSource();
     const et = await getEventTypes();
-    if (es && et) {
+    if (es && et && !eventsBound) {
         es.on(et.CHAT_CHANGED, onChatChanged);
         es.on(et.MESSAGE_SENT, onMessageChanged);
         es.on(et.MESSAGE_RECEIVED, onMessageChanged);
         es.on(et.GENERATION_AFTER_COMMANDS, onGeneration);
         es.on(et.SETTINGS_UPDATED, refreshPresets);
         await hookTokenEvents();
+        eventsBound = true;
     } else {
         log('event source not available, event hooks disabled');
     }
 
-    log('loaded, version 0.1.0');
+    initialized = true;
+    log('loaded, version 0.2.0');
 }
 
 // ---------------- UI 构建 ----------------
@@ -304,8 +319,6 @@ function buildDrawer() {
                                 <label for="miss-subapi-type"><i class="fa-solid fa-network-wired"></i> API 类型</label>
                                 <select id="miss-subapi-type" class="miss-input">
                                     <option value="openai">Chat 补全（OpenAI 兼容 / Claude / Gemini 等）</option>
-                                    <option value="textgenerationwebui">文本补全（TextGen / ooba / Tabby 等）</option>
-                                    <option value="kobold">KoboldAI</option>
                                 </select>
                             </div>
                             <div class="miss-field" id="miss-subapi-source-row">
@@ -600,6 +613,25 @@ function getStore() {
     const st = ctx.chatMetadata[MODULE];
     if (!Array.isArray(st.summaries)) {
         st.summaries = [];
+    }
+    // 兼容旧版本：将字符串或旧字段迁移为统一的 content
+    st.summaries = st.summaries
+        .map(item => {
+            if (typeof item === 'string') {
+                return { title: item.slice(0, 24), content: item };
+            }
+            if (!item || typeof item !== 'object') {
+                return null;
+            }
+            const content = String(item.content ?? item.text ?? item.summary ?? '').trim();
+            if (!content) {
+                return null;
+            }
+            return { ...item, content, title: String(item.title || content.split('\n')[0]).slice(0, 24) };
+        })
+        .filter(Boolean);
+    if (!st.hiddenMessageIds || typeof st.hiddenMessageIds !== 'object') {
+        st.hiddenMessageIds = {};
     }
     return st;
 }
@@ -1165,11 +1197,7 @@ async function bindUi() {
 async function reSummarizeAll() {
     const store = getStore();
     const summaries = Array.isArray(store.summaries) ? store.summaries : [];
-    if (!summaries.length) {
-        toast('暂无已总结摘要，请先执行一次总结', 'warning');
-        return;
-    }
-    // 重新总结也从当前聊天重新读取所有摘要标签正文，不读取标题或旧摘要正文
+    // 重新总结直接读取当前聊天中的所有摘要标签正文，不依赖旧 AI 摘要是否存在
     const taggedTexts = getTaggedContents();
     if (!taggedTexts.length) {
         toast('没有可重新总结的摘要标签内容', 'warning');
@@ -1272,6 +1300,31 @@ function markMessageHiddenDom(messageId, hidden) {
     } catch { /* ignore */ }
 }
 
+function restorePluginHiddenMessages(chat, store) {
+    const hidden = store.hiddenMessageIds || {};
+    let changed = false;
+    for (const [rawId, original] of Object.entries(hidden)) {
+        const id = Number(rawId);
+        const message = chat[id];
+        if (message) {
+            message.is_system = !!original;
+            markMessageHiddenDom(id, false);
+            changed = true;
+        }
+        delete hidden[rawId];
+    }
+    return changed;
+}
+
+function hideMessageByPlugin(message, id, store) {
+    store.hiddenMessageIds = store.hiddenMessageIds || {};
+    if (!Object.prototype.hasOwnProperty.call(store.hiddenMessageIds, String(id))) {
+        store.hiddenMessageIds[String(id)] = !!message.is_system;
+    }
+    message.is_system = true;
+    markMessageHiddenDom(id, true);
+}
+
 async function onGeneration() {
     const st = sSync();
     const keep = Number(st.keepVisibleFloors) || 0;
@@ -1281,7 +1334,8 @@ async function onGeneration() {
         return;
     }
 
-    let changed = false;
+    const store = getStore();
+    let changed = restorePluginHiddenMessages(chat, store);
 
     if (st.autoHideFloors) {
         // ===== 自动隐藏（用户最终规则：总结确认后，只保留最近一层角色的所有聊天内容，
@@ -1302,8 +1356,7 @@ async function onGeneration() {
         for (let i = 0; i < keepStartIdx; i++) {
             const m = chat[i];
             if (m && !m.is_system) {
-                m.is_system = true;
-                markMessageHiddenDom(i, true);
+                hideMessageByPlugin(m, i, store);
                 changed = true;
             }
         }
@@ -1331,14 +1384,17 @@ async function onGeneration() {
         for (let i = 0; i < keepStartIdx; i++) {
             const m = chat[i];
             if (m && !m.is_system) {
-                m.is_system = true;
-                markMessageHiddenDom(i, true);
+                hideMessageByPlugin(m, i, store);
                 changed = true;
             }
         }
         if (changed) {
             log(`自定义隐藏楼层：保留最近 ${keep} 个角色楼层及其间的用户楼层（第 ${keepStartIdx} 楼起），之前全部隐藏（只显示摘要）`);
         }
+    }
+
+    if (changed) {
+        await saveMetadata();
     }
 
     try {
@@ -1373,7 +1429,9 @@ async function checkAuto() {
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     const store = getStore();
     const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
-    const newCount = chat.length - 1 - lastId;
+    const newCount = new Set(extractRecords()
+        .filter(record => record.msgId > lastId)
+        .map(record => record.msgId)).size;
 
     let trigger = false;
     if (st.floorThreshold > 0 && newCount >= st.floorThreshold) {
@@ -1686,15 +1744,19 @@ async function saveSummaryToWorldInfo(name, content) {
     if (!data || typeof data !== 'object' || !data.entries) {
         data = { entries: {} };
     }
-    // 计算新 uid
-    const uids = Object.keys(data.entries).map(Number).filter(n => Number.isInteger(n));
-    const uid = uids.length ? Math.max(...uids) + 1 : 0;
+    // 插件只维护一个摘要条目，避免每次总结都把旧摘要重复注入
+    const managed = Object.entries(data.entries)
+        .filter(([, entry]) => String(entry?.comment || '').startsWith('Miss总结'));
+    const uid = managed.length ? Number(managed[0][0]) : 0;
+    for (const [oldUid] of managed.slice(1)) {
+        delete data.entries[oldUid];
+    }
     const pos = wm.world_info_position?.atDepth ?? 4;
     data.entries[uid] = {
         uid,
         key: [],
         keysecondary: [],
-        comment: `Miss总结 ${new Date().toLocaleString()}`,
+        comment: 'Miss总结（自动维护）',
         content: String(content || ''),
         constant: true,        // 蓝灯：常驻
         selective: true,
@@ -1775,6 +1837,14 @@ async function saveEdit(rec, newText) {
     } else if (rec.entry) {
         rec.entry.content = newText;
         await saveMetadata();
+        if (sSync().wiEnabled) {
+            try {
+                const wiTarget = await ensureChatWorldInfo();
+                await saveSummaryToWorldInfo(wiTarget, newText);
+            } catch (e) {
+                log('worldinfo write failed (edit)', e);
+            }
+        }
     }
     editingId = null;
     renderRecords();
@@ -1810,7 +1880,26 @@ async function writeSecretKey(key) {
     }
 }
 
-async function subApiGenerate(messages) {
+function parseSseContent(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed.startsWith('data:')) {
+        return '';
+    }
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === '[DONE]') {
+        return '';
+    }
+    try {
+        const chunk = JSON.parse(payload);
+        return chunk?.choices?.[0]?.delta?.content
+            ?? chunk?.choices?.[0]?.text
+            ?? '';
+    } catch {
+        return '';
+    }
+}
+
+async function subApiGenerate(messages, options = {}) {
     const st = sSync();
     const cfg = st.subApi || {};
     const url = normalizeSubUrl(cfg.url);
@@ -1823,15 +1912,15 @@ async function subApiGenerate(messages) {
         await writeSecretKey(cfg.key);
     }
     const stream = !!cfg.stream;
-    // max_tokens / temperature：跟随酒馆当前设置（无插件自有上限）
-    let maxTokens;
+    // max_tokens / temperature：跟随酒馆当前设置（测试调用可显式覆盖）
+    let maxTokens = Number(options.maxTokens) > 0 ? Number(options.maxTokens) : undefined;
     let temperature;
     try {
         const mod = await getSTModule();
         const oai = mod?.oai_settings;
         // openai_max_tokens = 酒馆「回复长度」；temp_openai = 酒馆「温度」
         const ot = Number(oai?.openai_max_tokens);
-        if (Number.isFinite(ot) && ot > 0) {
+        if (maxTokens === undefined && Number.isFinite(ot) && ot > 0) {
             maxTokens = ot;
         }
         const tp = Number(oai?.temp_openai);
@@ -1877,22 +1966,11 @@ async function subApiGenerate(messages) {
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
             for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith('data:')) {
-                    continue;
-                }
-                const payload = trimmed.slice(5).trim();
-                if (payload === '[DONE]') {
-                    continue;
-                }
-                try {
-                    const chunk = JSON.parse(payload);
-                    const delta = chunk?.choices?.[0]?.delta?.content
-                        ?? chunk?.choices?.[0]?.text
-                        ?? '';
-                    text += delta;
-                } catch { /* skip malformed chunk */ }
+                text += parseSseContent(line);
             }
+        }
+        if (buffer.trim()) {
+            text += parseSseContent(buffer);
         }
         const out = String(text || '').trim();
         if (!out) {
@@ -2058,7 +2136,7 @@ function renderSubApi() {
 function readSubApiForm() {
     const st = sSync();
     st.subApi = st.subApi || { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false };
-    st.subApi.type = String($('#miss-subapi-type', $drawer).val() || 'openai');
+    st.subApi.type = 'openai';
     st.subApi.source = String($('#miss-subapi-source', $drawer).val() || 'custom');
     st.subApi.url = normalizeSubUrl($('#miss-subapi-url', $drawer).val());
     st.subApi.key = String($('#miss-subapi-key', $drawer).val() || '');
