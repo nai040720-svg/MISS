@@ -86,28 +86,11 @@ async function getExtSettings() {
 }
 
 async function getSaveSettingsFn() {
-    const em = await extMod();
-    return em?.saveSettingsDebounced || (() => {
-        const st = window.saveSettingsDebounced;
-        if (typeof st === 'function') {
-            st();
-        }
-    });
-}
-
-async function getSaveMetadataFn() {
     const ctx = getContext();
-    if (typeof ctx?.saveMetadata === 'function') {
-        return ctx.saveMetadata;
-    }
+    if (typeof ctx?.saveSettingsDebounced === 'function') return ctx.saveSettingsDebounced;
     const mod = await stMod();
-    if (mod?.saveMetadataDebounced) {
-        return mod.saveMetadataDebounced;
-    }
-    if (window.saveMetadataDebounced) {
-        return window.saveMetadataDebounced;
-    }
-    return () => { };
+    if (typeof mod?.saveSettingsDebounced === 'function') return mod.saveSettingsDebounced;
+    throw new Error('SillyTavern settings persistence is unavailable');
 }
 
 async function getSetExtensionPrompt() {
@@ -154,14 +137,24 @@ async function saveSettings() {
     }
 }
 
-async function saveMetadata() {
-    try {
-        const fn = await getSaveMetadataFn();
-        // await 确保聊天元数据（含世界书绑定）真正落盘后再继续
-        await fn();
-    } catch (e) {
-        log('saveMetadata failed', e);
+async function saveMetadata(snapshot = captureChat()) {
+    assertCurrentChat(snapshot);
+    const ctx = getContext();
+    if (!snapshot.chatId || (!snapshot.groupId && !snapshot.avatar)) {
+        throw new Error('请先打开已保存的角色或群组聊天');
     }
+    // Serialize destination, metadata and messages before awaiting anything. ST's
+    // saveMetadata waits for a global save lock before resolving the current chat.
+    const header = { chat_metadata: snapshot.metadata, user_name: 'unused', character_name: 'unused' };
+    const chat = [header, ...snapshot.chat];
+    const body = snapshot.groupId ? { id: snapshot.chatId, chat, force: false } : {
+        ch_name: snapshot.characterName, file_name: snapshot.chatId,
+        avatar_url: snapshot.avatar, chat, force: false,
+    };
+    const response = await fetch(snapshot.groupId ? '/api/chats/group/save' : '/api/chats/save', {
+        method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(`聊天保存失败（HTTP ${response.status}），未强制覆盖`);
 }
 
 
@@ -210,6 +203,39 @@ function sSync() {
 
 let lastTokenCount = 0;
 let busy = false;
+let chatRevision = 0;
+let tokenRevision = 0;
+
+function captureChat() {
+    const ctx = getContext();
+    return { chat: ctx.chat, metadata: ctx.chatMetadata, characterId: ctx.characterId,
+        groupId: ctx.groupId, chatId: ctx.chatId, avatar: ctx.characters?.[ctx.characterId]?.avatar,
+        characterName: ctx.characters?.[ctx.characterId]?.name, revision: chatRevision,
+        messages: (ctx.chat || []).map(m => m?.mes) };
+}
+
+function assertCurrentChat(snapshot) {
+    const ctx = getContext();
+    if (snapshot.revision !== chatRevision || ctx.chat !== snapshot.chat
+        || ctx.chatMetadata !== snapshot.metadata || ctx.characterId !== snapshot.characterId
+        || ctx.groupId !== snapshot.groupId || ctx.chatId !== snapshot.chatId
+        || snapshot.messages.some((text, i) => ctx.chat[i]?.mes !== text)) {
+        throw new Error('聊天已切换或原文已修改，已停止后续操作；请在原聊天确认结果');
+    }
+}
+
+function keepStart(chat, keep) {
+    if (keep <= 0) return chat.length;
+    let remaining = keep;
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const m = chat[i];
+        if (m && !m.is_user && (!m.is_system || m.extra?.missSummaryHidden)) {
+            if (--remaining === 0) return i;
+        }
+    }
+    return 0;
+}
+
 const recordsOpen = new Set();
 let editingId = null;
 let $drawer = null;
@@ -253,7 +279,10 @@ async function init() {
         es.on(et.MESSAGE_SENT, onMessageChanged);
         es.on(et.MESSAGE_RECEIVED, onMessageChanged);
         es.on(et.GENERATION_AFTER_COMMANDS, onGeneration);
-        es.on(et.SETTINGS_UPDATED, refreshPresets);
+        es.on(et.SETTINGS_UPDATED, () => { tokenRevision++; _lastPromptTokens = 0; refreshPresets(); updateTokens(); });
+        for (const event of [et.MESSAGE_EDITED, et.MESSAGE_DELETED, et.MESSAGE_SWIPED]) {
+            if (event) es.on(event, onMessageChanged);
+        }
         await hookTokenEvents();
     } else {
         log('event source not available, event hooks disabled');
@@ -303,9 +332,7 @@ function buildDrawer() {
                             <div class="miss-field">
                                 <label for="miss-subapi-type"><i class="fa-solid fa-network-wired"></i> API 类型</label>
                                 <select id="miss-subapi-type" class="miss-input">
-                                    <option value="openai">Chat 补全（OpenAI 兼容 / Claude / Gemini 等）</option>
-                                    <option value="textgenerationwebui">文本补全（TextGen / ooba / Tabby 等）</option>
-                                    <option value="kobold">KoboldAI</option>
+                                    <option value="openai">Chat 补全（OpenAI 兼容）</option>
                                 </select>
                             </div>
                             <div class="miss-field" id="miss-subapi-source-row">
@@ -313,13 +340,6 @@ function buildDrawer() {
                                 <select id="miss-subapi-source" class="miss-input">
                                     <option value="custom">自定义（兼容 OpenAI）</option>
                                     <option value="openai">OpenAI</option>
-                                    <option value="claude">Claude</option>
-                                    <option value="makersuite">Google AI (Gemini)</option>
-                                    <option value="openrouter">OpenRouter</option>
-                                    <option value="deepseek">DeepSeek</option>
-                                    <option value="groq">Groq</option>
-                                    <option value="mistralai">MistralAI</option>
-                                    <option value="cohere">Cohere</option>
                                 </select>
                             </div>
                             <div class="miss-field">
@@ -403,7 +423,7 @@ function buildDrawer() {
                     <div class="miss-field">
                         <label><i class="fa-solid fa-gauge-high"></i> 总结设置</label>
                         <div class="miss-token-box">
-                            <div class="miss-token-label">当前总 Token（预设 + 聊天记录 + 提示词）</div>
+                            <div class="miss-token-label">Token 参考值（当前聊天估算 / 最近生成提示词）</div>
                             <div class="miss-token-value"><span id="miss-token-display">0</span></div>
                         </div>
                         <div class="miss-grid">
@@ -416,20 +436,20 @@ function buildDrawer() {
                                 <input id="miss-floor-threshold" class="miss-input" type="number" min="0" placeholder="0=关闭">
                             </div>
                             <div>
-                                <label for="miss-keep-floors" title="保留最近 N 个角色楼层（不含用户楼层），之前的所有楼层（包括用户楼层）全部隐藏，只注入摘要内容">隐藏楼层（保留最近 N 个角色楼）</label>
+                                <label for="miss-keep-floors" title="保留最近 N 个角色楼层；仅隐藏已成功总结范围内的更早楼层，调大或关闭可恢复本插件隐藏的楼层">隐藏楼层（保留最近 N 个角色楼）</label>
                                 <input id="miss-keep-floors" class="miss-input" type="number" min="0" placeholder="0=关闭">
                             </div>
                         </div>
                         <label class="miss-check" title="勾选后：当新楼层满「楼层总结」楼，或总 Token 满「Token 总结」时，插件自动调用 AI 总结一次，无需手动点按钮">
                             <input id="miss-auto-chk" type="checkbox"> 自动总结（达到上方阈值时插件自动触发，不勾选则只能手动点「立即总结」）
                         </label>
-                        <label class="miss-check" title="勾选后：总结完成后只保留最近 1 楼，其余楼层（包括用户输入的楼层）全部隐藏，且不注入任何摘要——AI 只看到最近 1 楼 + 世界书">
-                            <input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏楼层（总结后只保留最近 1 楼，其余含用户楼层全部隐藏，不注入摘要）
+                        <label class="miss-check" title="总结完成后保留最近 1 个角色楼层，只隐藏已总结的更早楼层；摘要通过世界书或备用注入保留">
+                            <input id="miss-hide-floors-chk" type="checkbox"> 自动隐藏已总结楼层（保留最近 1 个角色楼层）
                         </label>
                         <div class="miss-inline-row" style="margin-top:6px;">
                             <button id="miss-summarize-btn" class="miss-btn primary" style="flex:1;"><i class="fa-solid fa-wand-magic-sparkles"></i> 立即总结</button>
                         </div>
-                        <div class="miss-hint">总结针对当前打开的角色卡聊天记录，更换角色后 Token 数与记录会实时更新。<b>隐藏楼层N</b>：保留最近 N 个<b>角色楼层</b>（不含用户楼层），之前的所有楼层（<b>包括用户楼层</b>）全部隐藏，只注入摘要；<b>自动隐藏</b>：总结后只保留最近 1 楼，其余（含用户楼层）全部隐藏，<b>什么都不注入</b>（摘要也隐藏，AI 只看到最近 1 楼+世界书）。总结/破限提示词在「提示词」分类中设置。</div>
+                        <div class="miss-hint">只隐藏已经成功总结的楼层。提高保留数量或关闭隐藏会恢复本插件隐藏的楼层，不改变手动隐藏的楼层。世界书同步成功时使用世界书，否则保留摘要注入。Token 参考值是估算，不包含全部预设与世界书的最终组装开销。</div>
                     </div>
                 </div>
 
@@ -636,37 +656,23 @@ function cleanTagList(raw) {
 
 function extractRecords() {
     const ctx = getContext();
-    // Bug3：支持逗号分隔的多标签（中英文逗号、顿号），每个标签独立抓取
-    const rawTags = String(sSync().tag || '').trim();
-    if (!rawTags || !Array.isArray(ctx.chat)) {
-        return [];
-    }
-    const tags = [...new Set(rawTags.split(/[,，、]/).map(t => cleanTagName(t)).filter(Boolean))];
-    if (!tags.length) {
-        return [];
-    }
+    const tags = cleanTagList(sSync().tag).split(',').filter(Boolean);
     const records = [];
-    ctx.chat.forEach((m, idx) => {
-        if (!m || typeof m.mes !== 'string') {
-            return;
-        }
+    (ctx.chat || []).forEach((m, idx) => {
+        if (typeof m?.mes !== 'string') return;
         for (const tag of tags) {
-            const re = new RegExp(`<${escapeReg(tag)}[^>]*>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
-            re.lastIndex = 0;
-            const parts = [];
-            let mm;
-            while ((mm = re.exec(m.mes)) !== null) {
-                const t = String(mm[1] || '').trim();
-                if (t) {
-                    parts.push(t);
-                }
+            const re = new RegExp(`<${escapeReg(tag)}(?:\\s[^>]*)?>([\\s\\S]*?)</\\s*${escapeReg(tag)}\\s*>`, 'gi');
+            let match;
+            let occurrence = 0;
+            while ((match = re.exec(m.mes)) !== null) {
+                const content = match[1].trim();
+                const start = match.index + match[0].indexOf('>') + 1;
+                const end = start + match[1].length;
+                if (content) records.push({ id: `m${idx}_${tag}_${occurrence}`, type: 'extract',
+                    title: content.split('\n')[0].slice(0, 24), content, floor: idx + 1,
+                    msgId: idx, tag, start, end, original: m.mes });
+                occurrence++;
             }
-            if (!parts.length) {
-                continue;
-            }
-            const content = parts.join('\n');
-            const title = (content.split('\n')[0] || '').trim().slice(0, 24) || `楼层 ${idx + 1}`;
-            records.push({ id: `m${idx}_${tag}`, type: 'extract', title, content, floor: idx + 1, msgId: idx, tag });
         }
     });
     return records;
@@ -799,7 +805,6 @@ function renderSummaries() {
 // CHAT_COMPLETION_PROMPT_READY: chat API 最终消息数组（含全部预设/角色卡/聊天/注入）
 // GENERATE_AFTER_COMBINE_PROMPTS: 文本补全 API 最终合并后的字符串
 let _lastPromptTokens = 0;
-let _tokenCountFn = null;
 
 async function hookTokenEvents() {
     const es = await getEventSource();
@@ -816,6 +821,8 @@ async function hookTokenEvents() {
 }
 
 async function onPromptReady(data) {
+    if (busy) return;
+    const revision = tokenRevision;
     try {
         let text = '';
         if (Array.isArray(data?.chat)) {
@@ -829,7 +836,7 @@ async function onPromptReady(data) {
             return;
         }
         const n = await countTokens(text);
-        if (n > 0) {
+        if (revision === tokenRevision && n > 0) {
             _lastPromptTokens = n;
             paintTokenDisplay(n);
         }
@@ -864,12 +871,8 @@ async function updateTokens() {
     if (!$drawer || !$drawer.length) {
         return lastTokenCount;
     }
-    // 优先展示最近一次真实生成的精确值
-    if (_lastPromptTokens > 0) {
-        paintTokenDisplay(_lastPromptTokens);
-        return lastTokenCount;
-    }
-    // 无生成记录时：用与 ST 相同口径估算（系统提示 + 角色卡描述/场景/Personality + 作者注 + 世界书 + 全部楼层 + 注入）
+    const revision = tokenRevision;
+    // 无生成记录时：近似统计可见聊天、角色描述和摘要；不等同 ST 最终组装的完整提示词
     const ctx = getContext();
     let text = '';
     try {
@@ -883,7 +886,7 @@ async function updateTokens() {
         text += `${ctx.chatMetadata?.note_prompt || ''}\n`;
     } catch { /* ignore */ }
     try {
-        text += (ctx.chat || [])
+        text += (ctx.chat || []).filter(m => !m?.is_system)
             .map(m => `${m?.is_user ? (ctx.name1 || '用户') : (ctx.name2 || '角色')}: ${m?.mes || ''}`)
             .join('\n') + '\n';
     } catch { /* ignore */ }
@@ -895,7 +898,7 @@ async function updateTokens() {
     } catch { /* ignore */ }
 
     const n = await countTokens(text);
-    paintTokenDisplay(n);
+    if (revision === tokenRevision) paintTokenDisplay(n);
     return lastTokenCount;
 }
 
@@ -914,101 +917,34 @@ function refreshPresets() {
 }
 
 function collectPresets() {
-    const out = [];
-    const seen = new Set();
-    // ST 版本差异：预设下拉可能在主设置或弹窗中，遍历所有已知选择器
-    const selectors = '#settings_preset_openai, #settings_preset, [id^="settings_preset_openai"]';
-    $(selectors).each(function () {
-        $(this).find('option').each(function () {
-            const value = String($(this).val() || '').trim();
-            const text = String($(this).text() || '').trim();
-            if (value && !seen.has(value)) {
-                seen.add(value);
-                out.push({ value, text: text || value });
-            }
-        });
-    });
-    // 兜底：通过文件系统预设列表（openai 预设目录）
-    if (!out.length) {
-        try {
-            const ctx = getContext();
-            const names = ctx.getChatCompletionPresets?.() || [];
-            for (const n of names) {
-                const name = typeof n === 'string' ? n : n?.name;
-                if (name && !seen.has(name)) {
-                    seen.add(name);
-                    out.push({ value: name, text: name });
-                }
-            }
-        } catch { /* ignore */ }
-    }
-    return out;
+    const ctx = getContext();
+    const api = ctx.mainApi;
+    const pm = ctx.getPresetManager?.(api);
+    return (pm?.getAllPresets?.() || []).map(name => ({
+        value: JSON.stringify({ api, name }), text: name,
+    }));
 }
 
-async function applyPreset(name) {
-    if (!name) {
-        return false;
-    }
+async function applyPreset(value) {
+    if (!value) return false;
     const ctx = getContext();
-    try {
-        for (const type of ['openai', 'textcompletion', 'kobold', 'novel']) {
-            const pm = ctx.getPresetManager?.(type);
-            if (pm && typeof pm.selectPresetByName === 'function') {
-                const names = (pm.getAllPresets?.() || [])
-                    .map(p => (typeof p === 'string' ? p : p?.name))
-                    .filter(Boolean);
-                if (names.includes(name)) {
-                    await pm.selectPresetByName(name);
-                    return true;
-                }
-            }
-        }
-    } catch (e) {
-        log('preset manager switch failed', e);
-    }
-    for (const selector of ['#settings_preset_openai', '#settings_preset']) {
-        const $sel = $(selector);
-        if (!$sel.length) {
-            continue;
-        }
-        const opt = $sel.find('option').toArray()
-            .find(o => String(o.value) === name || String(o.text) === name);
-        if (opt) {
-            $sel.val(opt.value).trigger('change');
-            return true;
-        }
-    }
-    // 兜底：直接设置 API 预设名并保存
-    try {
-        const ctx = getContext();
-        const mod = await getSTModule();
-        if (mod?.oai_settings && typeof mod?.saveSettingsDebounced === 'function') {
-            mod.oai_settings.preset_settings_openai = name;
-            mod.saveSettingsDebounced();
-            return true;
-        }
-    } catch { /* ignore */ }
-    return false;
+    let preset;
+    try { preset = JSON.parse(value); } catch { preset = { api: ctx.mainApi, name: value }; }
+    if (preset.api !== ctx.mainApi) return false;
+    const pm = ctx.getPresetManager?.(preset.api);
+    // Old numeric option values are deliberately not resolved across API families.
+    if (!pm?.getAllPresets?.().includes(preset.name)) return false;
+    await pm.selectPreset(pm.findPreset(preset.name));
+    return true;
 }
 
 function currentPresetName() {
-    for (const selector of ['#settings_preset_openai', '#settings_preset']) {
-        const $sel = $(selector);
-        if ($sel.length && $sel.val()) {
-            return String($sel.find('option:selected').text() || $sel.val());
-        }
-    }
-    // 兜底：预设管理器
-    try {
-        const ctx = getContext();
-        const pm = ctx.getPresetManager?.('openai');
-        const name = pm?.getSelectedPresetName?.() || pm?.selected?.name;
-        if (name) {
-            return String(name);
-        }
-    } catch { /* ignore */ }
-    return null;
+    const ctx = getContext();
+    const name = ctx.getPresetManager?.(ctx.mainApi)?.getSelectedPresetName?.();
+    return name ? JSON.stringify({ api: ctx.mainApi, name }) : null;
 }
+
+
 
 // ---------------- 事件 ----------------
 
@@ -1053,7 +989,7 @@ async function bindUi() {
     $('#miss-preset-select', $drawer).on('change', function () {
         sSync().boundPreset = String($(this).val() || '');
         saveSettings();
-        toast(sSync().boundPreset ? `已绑定预设：${sSync().boundPreset}` : '已取消预设绑定');
+        toast(sSync().boundPreset ? `已绑定预设：${$(this).find('option:selected').text()}` : '已取消预设绑定');
     });
 
     $('#miss-token-threshold', $drawer).on('change', function () {
@@ -1067,6 +1003,7 @@ async function bindUi() {
     $('#miss-keep-floors', $drawer).on('change', function () {
         sSync().keepVisibleFloors = Math.max(0, Number($(this).val()) || 0);
         saveSettings();
+        onGeneration().then(updateTokens).catch(e => toast(e.message, 'error'));
     });
     $('#miss-summary-prompt, #miss-summary-prompt-p', $drawer).on('change', function () {
         // 两个输入框双向同步（同一份数据，两个分类入口）
@@ -1086,6 +1023,7 @@ async function bindUi() {
     $('#miss-hide-floors-chk', $drawer).on('change', function () {
         sSync().autoHideFloors = $(this).prop('checked');
         saveSettings();
+        onGeneration().then(updateTokens).catch(e => toast(e.message, 'error'));
         toast(sSync().autoHideFloors
             ? '✅ 自动隐藏已开启：总结过的楼层将不再发送给 AI'
             : '自动隐藏已关闭', 'info');
@@ -1156,90 +1094,15 @@ async function bindUi() {
 
 // 重新总结所有已总结摘要
 async function reSummarizeAll() {
-    const store = getStore();
-    const summaries = Array.isArray(store.summaries) ? store.summaries : [];
-    if (!summaries.length) {
-        toast('暂无已总结摘要，请先执行一次总结', 'warning');
-        return;
-    }
-    const ctx = getContext();
-    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    const oldTexts = summaries.map(x => x.content).filter(Boolean);
-    if (!oldTexts.length) {
-        toast('没有可重新总结的内容', 'warning');
-        return;
-    }
-
-    busy = true;
-    setBusy(true);
-    toast('🔄 开始重新总结…', 'info');
-    const prevPreset = currentPresetName();
-    try {
-        const st = sSync();
-        // 不加任何内部指令，只发送旧摘要内容本身（提示词由用户在提示词分类规定）
-        const combined = oldTexts.join('\n\n');
-        const chatText = combined;
-
-        let text, via;
-        try {
-            ({ text, via } = await generateSummaryText(chatText));
-        } catch (e) {
-            throw e;
-        }
-        if (typeof text !== 'string' || !text.trim()) {
-            throw new Error('重新总结失败（模型未返回内容）');
-        }
-        const content = text.trim();
-        const title = (content.split('\n')[0] || '').trim().slice(0, 24)
-            || `重总摘要 ${summaries.length + 1}`;
-
-        // 重新总结 = 把之前所有摘要全部重新总结成一份，【替换】旧摘要列表
-        // （不是在已总结的基础上追加；不推进总结点，upTo 取旧摘要最大值）
-        let maxOldUpTo = -1;
-        for (const s of summaries) {
-            if (typeof s.upTo === 'number' && s.upTo > maxOldUpTo) {
-                maxOldUpTo = s.upTo;
-            }
-        }
-        store.summaries = [{ title, content, ts: Date.now(), upTo: maxOldUpTo, resummarized: true }];
-        await saveMetadata();
-
-        // 写入世界书
-        let wiName = '';
-        if (sSync().wiEnabled) {
-            try {
-                const wiTarget = await ensureChatWorldInfo();
-                wiName = await saveSummaryToWorldInfo(wiTarget, content);
-            } catch (e) {
-                log('worldinfo write failed (resummarize)', e);
-            }
-        }
-
-        recordsOpen.clear();
-        editingId = null;
-        renderSummaries();
-        renderRecords();
-        await updateTokens();
-        await popupConfirm(
-            `✅ 重新总结完成！\n\n`
-            + `整合了 ${oldTexts.length} 条旧摘要\n`
-            + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
-            + `新摘要标题：${title}\n`
-            + (wiName ? `已写入世界书：「${wiName}」` : ''),
-        );
-    } catch (e) {
-        console.error('[MissSummary] resummarize failed', e);
-        toast(`❌ 重新总结失败：${e?.message || e}`, 'error');
-    } finally {
-        busy = false;
-        setBusy(false);
-        if (st_b() && prevPreset) {
-            setTimeout(() => applyPreset(prevPreset).catch(() => { }), 50);
-        }
-    }
+    return summarize(true, true);
 }
 
+
 async function onChatChanged() {
+    chatRevision++;
+    tokenRevision++;
+    _lastPromptTokens = 0;
+    lastTokenCount = 0;
     recordsOpen.clear();
     editingId = null;
     try {
@@ -1254,6 +1117,9 @@ const debouncedAuto = debounce(() => {
 }, 1200);
 
 function onMessageChanged() {
+    tokenRevision++;
+    _lastPromptTokens = 0;
+    renderRecords();
     debouncedAuto();
 }
 
@@ -1268,94 +1134,44 @@ function markMessageHiddenDom(messageId, hidden) {
 }
 
 async function onGeneration() {
-    const st = sSync();
-    const keep = Number(st.keepVisibleFloors) || 0;
+    const snapshot = captureChat();
     const ctx = getContext();
-    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    if (!chat.length) {
-        return;
-    }
-
+    const st = sSync();
+    const store = getStore();
+    const chat = ctx.chat || [];
+    const keep = st.autoHideFloors ? 1 : Math.max(0, Number(st.keepVisibleFloors) || 0);
+    const boundary = keep > 0 ? keepStart(chat, keep) : 0;
+    const covered = Math.max(-1, ...store.summaries.map(x => Number.isInteger(x.upTo) ? x.upTo : -1));
     let changed = false;
-
-    if (st.autoHideFloors) {
-        // ===== 自动隐藏（用户最终规则：总结确认后，只保留最近一层角色的所有聊天内容，
-        //       该角色楼之后的用户楼层也保留，其余全部隐藏含摘要不注入）=====
-        // 从尾部往前找最近 1 个角色楼层，保留起点 = 它；之前全部隐藏（含用户楼）
-        let counted = 0;
-        let keepStartIdx = chat.length;
-        for (let i = chat.length - 1; i >= 0; i--) {
-            const m = chat[i];
-            if (m && !m.is_user && !m.is_system) {
-                counted++;
-                keepStartIdx = i;
-                if (counted >= 1) {
-                    break;
-                }
-            }
+    chat.forEach((m, i) => {
+        if (!m) return;
+        const own = !!m.extra?.missSummaryHidden;
+        const hide = i < boundary && i <= covered;
+        if (hide && !m.is_system) {
+            m.extra = m.extra || {};
+            m.extra.missSummaryHidden = true;
+            m.is_system = true;
+            changed = true;
+            markMessageHiddenDom(i, true);
+        } else if (!hide && own) {
+            delete m.extra.missSummaryHidden;
+            m.is_system = false;
+            changed = true;
+            markMessageHiddenDom(i, false);
         }
-        for (let i = 0; i < keepStartIdx; i++) {
-            const m = chat[i];
-            if (m && !m.is_system) {
-                m.is_system = true;
-                markMessageHiddenDom(i, true);
-                changed = true;
-            }
-        }
-        if (changed) {
-            log(`自动隐藏：只保留最近一层角色内容（第 ${keepStartIdx} 楼起），之前全部隐藏（含用户楼层与摘要）`);
-        }
-    } else if (keep > 0 && chat.length > keep) {
-        // ===== 自定义隐藏楼层 N（用户最终规则）=====
-        // 保留最近 N 个角色楼层 + 这段区间内的用户楼层（跟随之），其余全部隐藏只显示摘要
-        // 例（keep=2）：0角(隐,摘要) 1用(隐) 2角(隐,摘要) 3用(隐) 4角(留) 5用(留) 6角(留)
-        // 从尾部往前数 N 个角色楼层，保留起点 = 第 N 个角色楼；它之前的全部隐藏（含用户楼）
-        let counted = 0;
-        let keepStartIdx = chat.length; // 保留区间起点（之前全部隐藏）
-        for (let i = chat.length - 1; i >= 0; i--) {
-            const m = chat[i];
-            if (m && !m.is_user && !m.is_system) {
-                counted++;
-                keepStartIdx = i;
-                if (counted >= keep) {
-                    break;
-                }
-            }
-        }
-        // 隐藏 0 .. keepStartIdx-1（含用户楼层与更早的角色楼层）
-        for (let i = 0; i < keepStartIdx; i++) {
-            const m = chat[i];
-            if (m && !m.is_system) {
-                m.is_system = true;
-                markMessageHiddenDom(i, true);
-                changed = true;
-            }
-        }
-        if (changed) {
-            log(`自定义隐藏楼层：保留最近 ${keep} 个角色楼层及其间的用户楼层（第 ${keepStartIdx} 楼起），之前全部隐藏（只显示摘要）`);
-        }
-    }
-
-    try {
-        // 注入摘要规则（功能4 最终版）：
-        // - 自动隐藏开启 → 不注入摘要（什么也不给）
-        // - 自定义隐藏楼层 → 注入摘要（补全被隐藏楼层的内容）
-        const injectEnabled = !st.autoHideFloors;
-        const pt = await getPromptTypesAsync();
-        const pr = await getPromptRolesAsync();
-        const sep = await getSetExtensionPrompt();
-        const texts = injectEnabled ? getStore().summaries.map(x => x.content).filter(Boolean) : [];
-        if (texts.length) {
-            // 直接注入摘要正文（不加插件内置的前缀/说明，遵守提示词只由用户规定）
-            const injection = texts.join('\n---\n');
-            sep(MODULE, injection, pt.IN_CHAT, 4, false, pr.SYSTEM);
-        } else {
-            sep(MODULE, '', pt.NONE, 0);
-        }
-    } catch (e) {
-        log('inject failed', e);
-    }
+    });
+    if (changed) { await saveMetadata(snapshot); tokenRevision++; _lastPromptTokens = 0; }
+    const pt = await getPromptTypesAsync();
+    const pr = await getPromptRolesAsync();
+    const sep = await getSetExtensionPrompt();
+    assertCurrentChat(snapshot);
+    // World Info already injects synchronized entries; never inject the same memory twice.
+    const texts = store.summaries.filter(x => !st.wiEnabled || x.wiName !== ctx.chatMetadata?.world_info || x.wiUid == null || x.wiSynced !== true)
+        .map(x => x.content).filter(Boolean);
+    sep(MODULE, texts.join('\n---\n'), texts.length ? pt.IN_CHAT : pt.NONE, 4, false, pr.SYSTEM);
 }
+
+
 
 // ---------------- 总结 ----------------
 
@@ -1383,183 +1199,94 @@ async function checkAuto() {
 }
 
 async function runSummary(manual) {
+    return summarize(manual, false);
+}
+
+async function summarize(manual, merge) {
     if (busy) {
-        if (manual) {
-            toast('⏳ 正在总结中，请稍候…', 'warning');
-        }
+        if (manual) toast('⏳ 正在总结中，请稍候…', 'warning');
         return;
     }
-    const ctx = getContext();
-    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    if (!chat.length) {
-        if (manual) {
-            toast('❌ 当前没有可总结的聊天记录', 'error');
-        }
-        return;
-    }
-
-    const stPre = sSync();
-    const hasSubApi = stPre.subApi?.url && normalizeSubUrl(stPre.subApi.url);
-    // 副API 与 主API 都不可用 → 提前明确告知（不默默失败）
-    if (!hasSubApi && !window.__missApiChecked) {
-        // 主API连接状态从 ST 全局读取（online_status !== 'no_connection'）
-        try {
-            const mod = await getSTModule();
-            const online = String(mod?.online_status || '');
-            if (online === 'no_connection') {
-                toast('❌ 未连接任何API（副API未填写，主API未连接），无法总结。请先在副API设置中连接，或连接酒馆主API。', 'error');
-                return;
-            }
-        } catch { /* 无法判断时不拦截 */ }
-    }
-
+    // Acquire before any await, including connection and preset checks.
     busy = true;
     setBusy(true);
-    if (manual) {
-        toast('🚀 开始总结…', 'info');
-    }
-    const prevPreset = currentPresetName();
+    const snapshot = captureChat();
+    const store = getStore();
+    const oldSummaries = [...store.summaries];
+    let previousPreset = null;
+    let switchedPreset = false;
     try {
         const st = sSync();
-        const store = getStore();
-        const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
-
-        // user 内容 = 摘要标签抓取的内容（上次总结点之后的楼层，不含隐藏楼层）
-        // 隐藏楼层：自动隐藏模式下最新摘要 upTo 之后的不可总结部分跳过；
-        // 自定义隐藏楼层 N = 最近 N 个角色楼层保留，更早的楼层不参与总结
-        let allRecords = extractRecords();
-        // 只总结「被隐藏楼层」里的摘要抓取（保留区楼层原文可见，无需进摘要）
-        if (st.autoHideFloors) {
-            // 自动隐藏：隐藏范围 = 最新摘要 upTo 之后（等待总结确认中），只取该范围
-            let maxUpTo = -1;
-            for (const s of store.summaries) {
-                if (typeof s.upTo === 'number' && s.upTo > maxUpTo) {
-                    maxUpTo = s.upTo;
-                }
-            }
-            allRecords = allRecords.filter(r => r.msgId > maxUpTo);
-        } else {
-            const keep = Number(st.keepVisibleFloors) || 0;
-            if (keep > 0) {
-                // 自定义隐藏 N：隐藏区 = 最近第 N 个角色楼之前 → 只取该范围的抓取
-                let counted = 0;
-                let keepStartIdx = chat.length;
-                for (let i = chat.length - 1; i >= 0; i--) {
-                    const m = chat[i];
-                    if (m && !m.is_user && !m.is_system) {
-                        counted++;
-                        keepStartIdx = i;
-                        if (counted >= keep) {
-                            break;
-                        }
-                    }
-                }
-                allRecords = allRecords.filter(r => r.msgId < keepStartIdx);
-            }
-        }
-        // 只取上次总结点之后的新抓取
-        allRecords = allRecords.filter(r => r.msgId > lastId);
-
-        if (!allRecords.length) {
-            if (manual) {
-                toast('没有新的摘要内容需要总结', 'info');
-            }
+        const boundary = !st.autoHideFloors && Number(st.keepVisibleFloors) > 0
+            ? keepStart(snapshot.chat || [], Number(st.keepVisibleFloors)) : Infinity;
+        const records = merge ? oldSummaries : extractRecords().filter(r =>
+            r.msgId > (store.lastMessageId ?? -1) && r.msgId < boundary);
+        if (!records.length) {
+            if (manual) toast(merge ? '暂无已总结摘要' : '没有新的摘要内容需要总结', 'info');
             return;
         }
-        // 本次实际总结覆盖到的最后一楼（用于下次总结起点与隐藏范围）
-        const lastSummarizedFloor = Math.max(...allRecords.map(r => r.msgId));
-
-        // chatText = 所有抓取记录的【完整内容】（r.content 是标签内全部文本，
-        // 不是标题；标题仅用于记录列表显示）
-        // 只发送抓取的原文内容本身，不加任何插件内置的标注/说明
-        const chatText = allRecords
-            .map(r => r.content)
-            .join('\n\n');
-        // 提示词结构由 buildSummaryMessages 构造
-        const prompt = chatText;
-
-        if (st.boundPreset) {
-            const ok = await applyPreset(st.boundPreset);
-            if (!ok) {
-                toast(`⚠️ 未找到预设「${st.boundPreset}」，使用当前预设总结`);
+        const upTo = merge ? Math.max(-1, ...oldSummaries.map(x => x.upTo ?? -1))
+            : Math.max(...records.map(x => x.msgId));
+        const prompt = records.map(x => x.content).filter(Boolean).join('\n\n');
+        if (!prompt) return;
+        if (!st.subApi?.url && st.boundPreset) {
+            previousPreset = currentPresetName();
+            if (previousPreset !== st.boundPreset) {
+                switchedPreset = await applyPreset(st.boundPreset);
+                if (!switchedPreset) throw new Error('绑定预设不存在或不属于当前 API，请重新选择');
             }
         }
-
-        let text, via;
-        try {
-            ({ text, via } = await generateSummaryText(prompt));
-        } catch (e) {
-            log('generateSummaryText failed', e);
+        assertCurrentChat(snapshot);
+        const { text, via } = await generateSummaryText(prompt);
+        assertCurrentChat(snapshot);
+        if (typeof text !== 'string' || !text.trim()) throw new Error('模型未返回内容');
+        const content = text.trim();
+        const entry = { id: crypto.randomUUID(), title: content.split('\n')[0].slice(0, 24), content,
+            ts: Date.now(), upTo, ...(merge ? { resummarized: true } : {}) };
+        const previousLastId = store.lastMessageId;
+        store.summaries = merge ? [entry] : [...oldSummaries, entry];
+        if (!merge) store.lastMessageId = upTo;
+        try { await saveMetadata(snapshot); } catch (e) {
+            store.summaries = oldSummaries;
+            store.lastMessageId = previousLastId;
             throw e;
         }
-        if (typeof text !== 'string' || !text.trim()) {
-            throw new Error('总结生成失败（模型未返回内容）');
+        assertCurrentChat(snapshot);
+        if (st.wiEnabled) {
+            try { await syncSummaryWorldInfo(snapshot, merge ? oldSummaries : []); }
+            catch (e) { toast(`世界书同步失败，摘要已保留在聊天中：${e.message}`, 'warning'); }
         }
-        const content = text.trim();
-        const title = (content.split('\n')[0] || '').trim().slice(0, 24)
-            || `摘要 ${store.summaries.length + 1}`;
-        store.summaries.push({ title, content, ts: Date.now(), upTo: lastSummarizedFloor });
-        store.lastMessageId = lastSummarizedFloor;
-        await saveMetadata();
-
-        // 功能2：自动写入聊天世界书
-        let wiName = '';
-        if (sSync().wiEnabled) {
-            try {
-                const wiTarget = await ensureChatWorldInfo();
-                wiName = await saveSummaryToWorldInfo(wiTarget, content);
-            } catch (e) {
-                log('worldinfo write failed', e);
-                toast(`⚠️ 世界书写入失败：${e?.message || e}`, 'warning');
-            }
-        }
-
+        assertCurrentChat(snapshot);
+        recordsOpen.clear();
+        editingId = null;
         renderRecords();
+        renderSummaries();
+        _lastPromptTokens = 0;
+        tokenRevision++;
+        await onGeneration();
         await updateTokens();
-
-        // 完成通知 + 询问是否隐藏以上楼层（包括摘要也隐藏，只保留最近一层角色内容）
-        if (manual) {
-            await popupConfirm(
-                `✅ 总结已完成！\n\n`
-                + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
-                + `摘要标题：${title}\n`
-                + (wiName ? `已写入世界书：「${wiName}」（已绑定聊天世界书，条目蓝灯@D999）\n\n摘要可在「记忆总结」页查看。` : '\n摘要已存入记录。'),
-            );
-        }
-        // 询问用户是否隐藏本次总结覆盖的所有楼层（含摘要，只保留最近一层角色的聊天内容）
-        const wantHide = await popupYesNo(
-            `总结已完成并写入世界书。\n\n是否要隐藏以上所有楼层（包括摘要）？\n`
-            + `选择「是」：只保留最近一层角色的所有聊天内容，其余楼层与摘要全部隐藏。\n`
-            + `选择「否」：保留所有楼层，仅按「隐藏楼层」设置正常隐藏。`,
-        );
-        if (wantHide) {
-            // 只保留最近一层角色楼，其余全部隐藏（含用户楼层），且清空摘要注入
-            sSync().autoHideFloors = true;
-            saveSettings();
-            if ($drawer && $drawer.length) {
-                $('#miss-hide-floors-chk', $drawer).prop('checked', true);
-            }
-            toast('✅ 已隐藏以上楼层（含摘要），只保留最近一层角色内容', 'success');
-        }
+        if (manual) toast(`✅ ${merge ? '重新总结' : '总结'}完成（${via === 'subapi' ? '副API' : '当前API'}）：${entry.title}`, 'success');
     } catch (e) {
-        console.error('[MissSummary] summarize failed', e);
+        log('summary failed', e);
         toast(`❌ 总结失败：${e?.message || e}`, 'error');
     } finally {
-        busy = false;
-        setBusy(false);
-        if (st_b() && prevPreset) {
-            setTimeout(() => applyPreset(prevPreset).catch(() => { }), 50);
+        try {
+            if (switchedPreset && previousPreset && snapshot.revision === chatRevision
+                && getContext().chatMetadata === snapshot.metadata && currentPresetName() === sSync().boundPreset) {
+                await applyPreset(previousPreset);
+            }
+        } finally {
+            busy = false;
+            setBusy(false);
         }
     }
 }
 
-function st_b() {
-    return Boolean(sSync().boundPreset);
-}
+
 
 function setBusy(on) {
     $('#miss-status-dot', $drawer).toggleClass('busy', !!on);
-    const $btn = $('#miss-summarize-btn', $drawer);
+    const $btn = $('#miss-summarize-btn, #miss-resummarize-btn', $drawer);
     $btn.prop('disabled', !!on).toggleClass('disabled', !!on);
 }
 
@@ -1580,14 +1307,6 @@ async function wiMod() {
     return _wiMod;
 }
 
-function nextWiCounter() {
-    const st = sSync();
-    st.wiCounter = Number(st.wiCounter) || 0;
-    st.wiCounter += 1;
-    saveSettings();
-    return st.wiCounter;
-}
-
 /**
  * 将总结内容写入世界书：
  * - 世界书名 = 传入的 name（如「总结1」，数字按总结次数递增）
@@ -1600,189 +1319,136 @@ function nextWiCounter() {
  * 1. 当前聊天已绑定聊天世界书 → 直接注入该世界书（第一优先）
  * 2. 未绑定 → 自动创建「{角色名}总结世界书」并绑定为聊天世界书
  */
-async function ensureChatWorldInfo() {
+async function saveWorldInfoChecked(name, data, wm) {
+    // ST saveWorldInfo currently doesn't check the HTTP status. Do not acknowledge
+    // a failed write or suppress fallback injection based on its optimistic cache.
+    const response = await fetch('/api/worldinfo/edit', {
+        method: 'POST', headers: getContext().getRequestHeaders(),
+        body: JSON.stringify({ name, data }),
+    });
+    if (!response.ok) throw new Error(`世界书保存失败（HTTP ${response.status}）`);
+    wm.worldInfoCache?.set(name, data);
+}
+
+async function ensureChatWorldInfo(snapshot = captureChat()) {
     const wm = await wiMod();
-    if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) {
-        throw new Error('world-info 模块不可用');
-    }
+    assertCurrentChat(snapshot);
     const ctx = getContext();
-    if (!ctx.chatMetadata || typeof ctx.chatMetadata !== 'object') {
-        ctx.chatMetadata = {};
-    }
-    // 1) 已绑定聊天世界书：直接复用
-    const bound = String(ctx.chatMetadata.world_info || '').trim();
-    if (bound) {
-        return bound;
-    }
-    // 2) 未绑定：创建「{角色名}总结世界书」
-    const charName = String(ctx.name2 || ctx.characters?.[ctx.characterId]?.name || '').trim() || '角色';
-    const baseName = `${charName}总结世界书`;
-    // 重名处理：已存在同名全局文件时追加序号（带上限防死循环）
-    let name = baseName;
-    let n = 2;
-    const MAX_TRIES = 50;
-    while (n - 2 < MAX_TRIES && await worldExists(name)) {
-        name = `${baseName}${n}`;
-        n++;
-    }
-    await wm.saveWorldInfo(name, { entries: {} }, true);
-    try {
-        if (typeof wm.updateWorldInfoList === 'function') {
-            await wm.updateWorldInfoList();
-        }
-    } catch { /* ignore */ }
-    // 绑定为聊天世界书
+    if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) throw new Error('world-info 模块不可用');
+    if (ctx.chatMetadata.world_info) return ctx.chatMetadata.world_info;
+    // Unique per-chat book; do not probe/create over an existing character's book.
+    const name = `${ctx.name2 || '角色'}总结-${crypto.randomUUID()}`;
+    await saveWorldInfoChecked(name, { entries: {} }, wm);
+    assertCurrentChat(snapshot);
     ctx.chatMetadata.world_info = name;
-    try {
-        const mod = await getSTModule();
-        if (mod?.saveMetadata) {
-            await mod.saveMetadata();
-        }
-        if (window.jQuery) {
-            window.jQuery('.chat_lorebook_button').addClass('world_set');
-        }
-    } catch (e) {
-        log('auto bind chat world failed', e);
-    }
-    toast(`📖 角色卡未绑定聊天世界书，已自动创建「${name}」并绑定`, 'info');
+    await saveMetadata();
+    await wm.updateWorldInfoList?.();
+    assertCurrentChat(snapshot);
     return name;
 }
 
-async function worldExists(name) {
-    try {
-        // 注意：loadWorldInfo 对不存在的文件后端返回 {entries:{}}（HTTP 200），
-        // 无法用于探测存在性！改用 ST 的 world_names 列表（/api/settings/get 拉取）
-        const mod = await getSTModule();
-        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
-        const resp = await fetch('/api/settings/get', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({}),
-        });
-        if (!resp.ok) {
-            return false;
-        }
-        const data = await resp.json().catch(() => ({}));
-        const names = Array.isArray(data?.world_names) ? data.world_names : [];
-        return names.includes(String(name));
-    } catch {
-        return false;
-    }
-}
-
-async function saveSummaryToWorldInfo(name, content) {
+async function syncSummaryWorldInfo(snapshot = captureChat(), removed = []) {
+    const name = await ensureChatWorldInfo(snapshot);
     const wm = await wiMod();
-    if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) {
-        throw new Error('world-info 模块不可用');
-    }
-    const ctx = getContext();
-    // 世界书内容：可能已存在（同名则追加条目）
-    let data = null;
-    try {
-        data = await wm.loadWorldInfo(name);
-    } catch { /* 不存在 */ }
-    if (!data || typeof data !== 'object' || !data.entries) {
-        data = { entries: {} };
-    }
-    // 计算新 uid
-    const uids = Object.keys(data.entries).map(Number).filter(n => Number.isInteger(n));
-    const uid = uids.length ? Math.max(...uids) + 1 : 0;
-    const pos = wm.world_info_position?.atDepth ?? 4;
-    data.entries[uid] = {
-        uid,
-        key: [],
-        keysecondary: [],
-        comment: `Miss总结 ${new Date().toLocaleString()}`,
-        content: String(content || ''),
-        constant: true,        // 蓝灯：常驻
-        selective: true,
-        selectiveLogic: 0,
-        addMemo: true,
-        order: 100,
-        position: pos,         // @D 系统插入深度
-        depth: 999,            // 插入深度 999
-        role: 0,               // system
-        disable: false,
-        excludeRecursion: false,
-        preventRecursion: false,
-        probability: 100,
-        useProbability: true,
-        group: '',
-        groupOverride: false,
-        groupWeight: 100,
-        scanDepth: null,
-        caseSensitive: null,
-        matchWholeWords: null,
-        useGroupScoring: null,
-        automationId: '',
-        sticky: null,
-        cooldown: null,
-        delay: null,
-    };
-    await wm.saveWorldInfo(name, data, true);
-
-    // 刷新 ST 世界书下拉列表（否则新世界书在 UI 列表里看不到）
-    try {
-        if (typeof wm.updateWorldInfoList === 'function') {
-            await wm.updateWorldInfoList();
+    const loaded = await wm.loadWorldInfo(name);
+    assertCurrentChat(snapshot);
+    const data = structuredClone(loaded || { entries: {} });
+    data.entries = data.entries || {};
+    // Adopt legacy entries only when both the original content and MISS marker match uniquely.
+    // Ambiguous entries stay untouched; never sweep a shared lorebook by its comment prefix.
+    const summaries = getStore().summaries;
+    for (const entry of [...removed, ...summaries]) entry.id ||= crypto.randomUUID();
+    const owns = (entry, wiEntry) => wiEntry && (wiEntry.missSummaryId === entry.id
+        || (!wiEntry.missSummaryId && /^Miss总结(?: |:)/.test(wiEntry.comment || '') && wiEntry.content === entry.content));
+    const reserved = new Set([...summaries, ...removed].filter(x => x.wiName === name && x.wiUid != null).map(x => String(x.wiUid)));
+    for (const entry of [...removed, ...summaries]) {
+        const byId = Object.values(data.entries).find(x => x.missSummaryId === entry.id);
+        if (byId) { entry.wiName = name; entry.wiUid = byId.uid; reserved.add(String(byId.uid)); continue; }
+        if (entry.wiName === name && owns(entry, data.entries[entry.wiUid])) continue;
+        const matches = Object.values(data.entries).filter(x => !x.missSummaryId && !reserved.has(String(x.uid))
+            && /^Miss总结(?: |:)/.test(x.comment || '') && x.content === entry.content);
+        if (matches.length === 1) {
+            entry.wiName = name;
+            entry.wiUid = matches[0].uid;
+            reserved.add(String(entry.wiUid));
+        } else if (matches.length > 1) {
+            throw new Error('发现多个相同的旧版 Miss 世界书条目，请先在世界书中消除歧义后重试');
         }
-    } catch (e) {
-        log('updateWorldInfoList failed', e);
     }
-
-    // 绑定为聊天世界书（不是角色世界书、不是全局）
-    try {
-        const ctx2 = getContext();
-        if (ctx2 && typeof ctx2 === 'object') {
-            if (!ctx2.chatMetadata || typeof ctx2.chatMetadata !== 'object') {
-                ctx2.chatMetadata = {};
-            }
-            ctx2.chatMetadata.world_info = name;
-        }
-        const mod = await getSTModule();
-        if (mod?.saveMetadata) {
-            await mod.saveMetadata();
-        }
-        // 刷新世界书下拉与聊天绑定状态
-        try {
-            const es = await getEventSource();
-            const et = await getEventTypes();
-            if (es && et?.WORLDINFO_UPDATED && es.emit) {
-                await es.emit(et.WORLDINFO_UPDATED, name, data);
-            }
-        } catch { /* ignore */ }
-        if (typeof $ === 'function' && window.jQuery) {
-            window.jQuery('.chat_lorebook_button').addClass('world_set');
-        }
-    } catch (e) {
-        log('chat world bind failed', e);
+    // Only touch entries recorded as owned by this chat. Never delete unrelated lore.
+    for (const entry of removed) {
+        if (entry.wiName === name && owns(entry, data.entries[entry.wiUid])) delete data.entries[entry.wiUid];
     }
+    const refs = [];
+    for (const summary of summaries) {
+        let uid = summary.wiName === name ? summary.wiUid : null;
+        if (uid == null || !owns(summary, data.entries[uid])) {
+            uid = Math.max(-1, ...Object.keys(data.entries).map(Number).filter(Number.isInteger)) + 1;
+        }
+        data.entries[uid] = { ...(data.entries[uid] || {}), uid, key: [], keysecondary: [],
+            missSummaryId: summary.id, comment: `Miss总结: ${summary.title}`, content: summary.content,
+            constant: true, selective: true, selectiveLogic: 0, addMemo: true,
+            order: 100, position: wm.world_info_position?.atDepth ?? 4, depth: 999,
+            role: 0, disable: false, excludeRecursion: true, preventRecursion: true,
+            probability: 100, useProbability: true, group: '', groupOverride: false,
+            groupWeight: 100, scanDepth: null, caseSensitive: null, matchWholeWords: null,
+            useGroupScoring: null, automationId: '', sticky: null, cooldown: null, delay: null };
+        refs.push({ summary, uid });
+    }
+    assertCurrentChat(snapshot);
+    await saveWorldInfoChecked(name, data, wm);
+    assertCurrentChat(snapshot);
+    for (const { summary, uid } of refs) { summary.wiName = name; summary.wiUid = uid; summary.wiSynced = true; }
+    await saveMetadata();
+    const es = await getEventSource();
+    const et = await getEventTypes();
+    if (et?.WORLDINFO_UPDATED) await es?.emit?.(et.WORLDINFO_UPDATED, name, data);
     return name;
 }
+
+
 
 // ---------------- 编辑摘要 ----------------
 
 async function saveEdit(rec, newText) {
+    if (busy) { toast('请等待当前总结完成后再编辑', 'warning'); return; }
+    busy = true;
+    setBusy(true);
+    const snapshot = captureChat();
     const ctx = getContext();
-    if (rec.type === 'extract') {
-        const m = ctx.chat?.[rec.msgId];
-        if (m && typeof m.mes === 'string' && m.mes.includes(rec.content)) {
-            m.mes = m.mes.split(rec.content).join(newText);
-            ctx.saveChat?.();
-        }
-    } else if (rec.entry) {
-        rec.entry.content = newText;
-        await saveMetadata();
-    }
-    editingId = null;
-    renderRecords();
-    updateTokens();
-    toast('✅ 已保存并覆盖到聊天');
+    try {
+        if (rec.type === 'extract') {
+            const m = ctx.chat?.[rec.msgId];
+            if (!m || m.mes !== rec.original) throw new Error('聊天原文已改变，请重新打开编辑');
+            m.mes = m.mes.slice(0, rec.start) + newText + m.mes.slice(rec.end);
+            await saveMetadata(captureChat());
+        } else if (rec.entry && getStore().summaries.includes(rec.entry)) {
+            rec.entry.id ||= crypto.randomUUID();
+            const previous = { ...rec.entry };
+            rec.entry.wiSynced = false;
+            rec.entry.content = newText;
+            rec.entry.title = newText.split('\n')[0].slice(0, 24);
+            await saveMetadata();
+            assertCurrentChat(snapshot);
+            if (sSync().wiEnabled) await syncSummaryWorldInfo(snapshot, [previous]);
+        } else throw new Error('摘要已改变，请重新打开编辑');
+        editingId = null;
+        renderRecords();
+        renderSummaries();
+        _lastPromptTokens = 0;
+        tokenRevision++;
+        await updateTokens();
+        toast('✅ 已保存');
+    } catch (e) {
+        toast(`保存失败：${e.message}`, 'error');
+    } finally { busy = false; setBusy(false); }
 }
+
+
 
 // ---------------- 副API ----------------
 // 走 ST 后端代理：/api/backends/chat-completions/generate + chat_completion_source=custom
-// 密钥通过 /api/secrets/write 写入 api_key_custom，由后端读取
+// 使用请求级 reverse_proxy / proxy_password，不读写任何全局 API secret
 
 function normalizeSubUrl(url) {
     let u = String(url || '').trim().replace(/\/+$/, '');
@@ -1792,41 +1458,29 @@ function normalizeSubUrl(url) {
     return u;
 }
 
-async function writeSecretKey(key) {
-    try {
-        const mod = await getSTModule();
-        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
-        const resp = await fetch('/api/secrets/write', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ key: 'api_key_custom', value: String(key || '') }),
-        });
-        return resp.ok;
-    } catch (e) {
-        log('writeSecretKey failed', e);
-        return false;
+function subApiRequestConfig() {
+    const cfg = sSync().subApi || {};
+    const url = normalizeSubUrl(cfg.url);
+    if (!url) throw new Error('副API地址为空');
+    if (cfg.type !== 'openai' || !['custom', 'openai'].includes(cfg.source || 'custom')) {
+        throw new Error('副API目前支持 OpenAI 兼容接口（OpenAI / Custom），请修改类型与来源');
     }
+    // Explicit reverse proxy credentials are request-scoped; never read or modify main API secrets.
+    return { chat_completion_source: 'openai', reverse_proxy: url, proxy_password: cfg.key || '' };
 }
+
+
 
 async function subApiGenerate(messages) {
     const st = sSync();
     const cfg = st.subApi || {};
-    const url = normalizeSubUrl(cfg.url);
-    if (!url) {
-        throw new Error('副API地址为空');
-    }
-    const source = String(cfg.source || 'custom');
-    // 先写入密钥到 ST secrets（CUSTOM 源从后端读取）
-    if (cfg.key) {
-        await writeSecretKey(cfg.key);
-    }
+    const route = subApiRequestConfig();
     const stream = !!cfg.stream;
     // max_tokens / temperature：跟随酒馆当前设置（无插件自有上限）
     let maxTokens;
     let temperature;
     try {
-        const mod = await getSTModule();
-        const oai = mod?.oai_settings;
+        const oai = getContext().chatCompletionSettings;
         // openai_max_tokens = 酒馆「回复长度」；temp_openai = 酒馆「温度」
         const ot = Number(oai?.openai_max_tokens);
         if (Number.isFinite(ot) && ot > 0) {
@@ -1839,18 +1493,17 @@ async function subApiGenerate(messages) {
     } catch { /* 取不到就跟随 API 默认 */ }
     // 用户在副API设置里自定义了温度则覆盖酒馆值
     const userTemp = Number(cfg.temperature);
-    if (Number.isFinite(userTemp)) {
+    if (cfg.temperature !== '' && cfg.temperature != null && Number.isFinite(userTemp)) {
         temperature = userTemp;
     }
     const body = {
-        chat_completion_source: source,
+        ...route,
         model: String(cfg.model || 'gpt-4o-mini'),
         messages,
         max_tokens: maxTokens,
         temperature,
         stream,
-        custom_url: url,
-        custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
+
     };
     const mod = await getSTModule();
     const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
@@ -1931,27 +1584,14 @@ async function subApiFetchModels() {
     try {
         const st = sSync();
         const cfg = st.subApi || {};
-        const url = normalizeSubUrl(cfg.url);
-        if (!url) {
-            return { ok: false, error: '副API地址为空' };
-        }
-        const source = String(cfg.source || 'custom');
-        if (cfg.key) {
-            await writeSecretKey(cfg.key);
-        }
+        const route = subApiRequestConfig();
         const mod = await getSTModule();
         const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
         // 复用后端 status 端点拉取模型列表（source=custom 时读 custom_url）
         const resp = await fetch('/api/backends/chat-completions/status', {
             method: 'POST',
             headers,
-            body: JSON.stringify({
-                chat_completion_source: source,
-                reverse_proxy: url,
-                proxy_password: cfg.key || '',
-                custom_url: url,
-                custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
-            }),
+            body: JSON.stringify(route),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || data.error) {
@@ -1989,31 +1629,13 @@ async function generateSummaryText(chatText) {
     const messages = buildSummaryMessages(chatText);
 
     if (st.subApi?.url) {
-        try {
-            return { text: await subApiGenerate(messages), via: 'subapi' };
-        } catch (e) {
-            log('subApi generate failed, fallback to ST API', e);
-            toast(`⚠️ 副API失败（${e?.message || e}），改用酒馆当前API`, 'warning');
-        }
+        return { text: await subApiGenerate(messages), via: 'subapi' };
     }
     // 主 API：用户填写的 system 提示词前置（未填写则只有 chatText 本身）
     const systemPart = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
     const prompt = systemPart ? `${systemPart}\n\n${chatText}` : chatText;
     const ctx = getContext();
-    let out;
-    try {
-        // responseLength：给总结留足输出空间（覆盖酒馆回复长度设置，避免总结被截断）
-        out = await ctx.generateQuietPrompt({ quietPrompt: prompt, responseLength: 1024 });
-    } catch (e) {
-        log('object-arg generateQuietPrompt failed', e);
-    }
-    if (typeof out !== 'string' || !out.trim()) {
-        try {
-            out = await ctx.generateQuietPrompt(prompt, false, false, null, null, 1024);
-        } catch (e) {
-            log('positional generateQuietPrompt failed', e);
-        }
-    }
+    const out = await ctx.generateQuietPrompt({ quietPrompt: prompt, responseLength: 1024 });
     if (typeof out !== 'string' || !out.trim()) {
         throw new Error('总结生成失败（模型未返回内容）');
     }
