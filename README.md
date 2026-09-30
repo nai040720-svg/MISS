@@ -43,3 +43,30 @@ https://github.com/nai040720-svg/MISS
 ## 许可
 
 MIT
+
+## 安全与兼容性修复
+
+- 总结、重新总结和编辑共用互斥锁；切换聊天或修改输入时停止后续处理。聊天写入使用捕获的角色/群组聊天目标，不会将 A 聊天摘要保存到 B
+- 仅隐藏已成功总结范围；增大保留楼层或关闭隐藏会恢复本插件标记的隐藏。旧版或手工隐藏没有归属标记，不会自动恢复
+- 摘要和世界书使用稳定 ID 对应；编辑及重新总结更新所属条目，保护其他世界书内容。旧版条目仅在内容与 Miss 标记唯一匹配时迁移，有歧义会提示
+- 世界书成功同步后避免重复注入；写入失败时仍保留聊天内摘要和备用注入
+- 副 API 目前明确支持 OpenAI 兼容的 Chat Completions 接口。原先展示但未实现的原生 Claude、Gemini、Kobold 等选项已移除，旧配置会明确报错。兼容网关可选择 Custom 并填写其 OpenAI 兼容地址
+- 密钥通过每次请求的 `reverse_proxy` / `proxy_password` 传给 ST 后端，不再读写主 API 的全局 secret。副 API 失败时停止，不会擅自回退到主 API。插件配置中的密钥仍属于敏感信息，不应分享设置导出文件
+- 绑定预设按当前 API 类型和名称定位，通过官方 preset manager 等待应用完成；只在实际切换且仍处于同一聊天/预设时恢复。旧数字索引需重新选择绑定
+- Token 显示是当前聊天估算或最近生成提示词计数，不保证等于 ST 最终包含全部预设、世界书及多模态开销的实际用量
+
+## 开发验证
+
+无需依赖即可运行语法检查与回归：
+
+```sh
+npm test
+```
+
+真实 ST 后端 + 本地 mock 集成：先在官方 SillyTavern checkout 安装依赖，将本目录链接/复制为 `public/scripts/extensions/third-party/MISS`，然后运行：
+
+```sh
+ST_ROOT=/path/to/SillyTavern npm run test:integration
+```
+
+集成测试创建全新的临时数据目录，只使用虚构聊天和虚构密钥，启动本地 ST（8765）与 mock（9876）。ST 子进程的出站 HTTP/fetch 限制为 loopback，不请求真实模型。测试覆盖真实代理生成、SSE、模型列表、聊天/设置/世界书持久化与失败路径。Node 测试通过上下文适配器执行插件逻辑；这不是浏览器页面端到端测试。验证环境使用 ST 1.19.0、release commit `06bde939fb1e9c4c8d8641d810f0a916b5bce127`。
