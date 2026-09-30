@@ -37,7 +37,7 @@ https://github.com/nai040720-svg/MISS
 
 ## API
 
-副 API 当前支持 OpenAI 兼容的 Chat Completions 接口。API 密钥会通过 SillyTavern Secrets 写入后端；请避免在共享环境中保存敏感配置。
+副 API 当前支持 OpenAI 兼容的 Chat Completions 接口。API 密钥会写入 SillyTavern Secrets 供请求使用，同时当前配置仍会保存在扩展设置中以支持重启后复用；请不要在共享环境中保存或提交敏感配置。
 
 ## 数据存储
 
