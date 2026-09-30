@@ -213,6 +213,7 @@ function sSync() {
 
 let lastTokenCount = 0;
 let busy = false;
+let activeResummaryMessageIds = new Set();
 const recordsOpen = new Set();
 let editingId = null;
 let $drawer = null;
@@ -1363,6 +1364,7 @@ async function reSummarizeAt(index) {
     let replaced = false;
     busy = true;
     setBusy(true);
+    activeResummaryMessageIds = new Set(ids);
     for (const { id } of snapshots) {
         chat[id].is_system = false;
         markMessageHiddenDom(id, false);
@@ -1404,6 +1406,7 @@ async function reSummarizeAt(index) {
         Object.assign(target, previous);
         await showSummaryFailure(e, '重新总结');
     } finally {
+        activeResummaryMessageIds.clear();
         for (const { id, isSystem } of snapshots) {
             chat[id].is_system = isSystem;
             markMessageHiddenDom(id, isSystem);
@@ -1474,6 +1477,8 @@ function hideMessageByPlugin(message, id, store) {
 }
 
 async function onGeneration() {
+    // 主 API 重新总结期间不运行常规隐藏规则，确保目标楼层保持可见。
+    if (activeResummaryMessageIds.size) return;
     const st = sSync();
     const keep = Number(st.keepVisibleFloors) || 0;
     const ctx = getContext();
