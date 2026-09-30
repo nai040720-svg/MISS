@@ -690,12 +690,12 @@ function buildUnifiedRecords() {
                 if (t) tagged.push(t);
             }
         }
-        const content = tagged.length ? tagged.join('\\n') : String(m.mes).trim();
+        const content = tagged.length ? tagged.join('\n') : String(m.mes).trim();
         if (!content) return;
         records.push({
             id: `m${idx}_${tagged.length ? 'tag' : 'context'}`,
             type: tagged.length ? 'extract' : 'context',
-            title: tagged.length ? (content.split('\\n')[0] || `楼层 ${idx + 1}`).slice(0, 24) : `楼层 ${idx + 1}（无标签正文）`,
+            title: tagged.length ? (content.split('\n')[0] || `楼层 ${idx + 1}`).slice(0, 24) : `楼层 ${idx + 1}（无标签正文）`,
             content, msgId: idx, floor: idx + 1, sourceMessage: m.mes
         });
     });
@@ -781,7 +781,7 @@ function renderRecords() {
         const open = recordsOpen.has(r.id) ? ' open' : '';
         const badge = r.type === 'context' ? '无标签正文' : `楼层 ${r.floor}`;
         const isEditing = editingId === r.id;
-        const body = isEditing ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(r.content)}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
+        const body = isEditing ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(r.content)}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
         return `<div class="miss-record${open}" data-id="${r.id}"><div class="miss-record-header"><span class="miss-record-title">${escapeHtml(r.title)}</span><span class="miss-record-badge">${badge}</span></div><div class="miss-record-body">${body}</div></div>`;
     }).join(''));
 }
