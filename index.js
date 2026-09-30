@@ -677,6 +677,13 @@ function allRecords() {
     return extractRecords();
 }
 
+// 总结输入只允许使用摘要标签内的完整正文，绝不使用 title（title 仅用于界面显示）
+function getTaggedContents(records = extractRecords()) {
+    return records
+        .map(record => String(record?.content || '').trim())
+        .filter(Boolean);
+}
+
 function summaryRecords() {
     const store = getStore();
     return store.summaries.map((it, i) => ({
@@ -1162,11 +1169,10 @@ async function reSummarizeAll() {
         toast('暂无已总结摘要，请先执行一次总结', 'warning');
         return;
     }
-    const ctx = getContext();
-    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    const oldTexts = summaries.map(x => x.content).filter(Boolean);
-    if (!oldTexts.length) {
-        toast('没有可重新总结的内容', 'warning');
+    // 重新总结也从当前聊天重新读取所有摘要标签正文，不读取标题或旧摘要正文
+    const taggedTexts = getTaggedContents();
+    if (!taggedTexts.length) {
+        toast('没有可重新总结的摘要标签内容', 'warning');
         return;
     }
 
@@ -1176,9 +1182,8 @@ async function reSummarizeAll() {
     const prevPreset = currentPresetName();
     try {
         const st = sSync();
-        // 不加任何内部指令，只发送旧摘要内容本身（提示词由用户在提示词分类规定）
-        const combined = oldTexts.join('\n\n');
-        const chatText = combined;
+        // 只发送摘要标签抓取的完整正文；title 仅用于界面显示
+        const chatText = taggedTexts.join('\n\n');
 
         let text, via;
         try {
@@ -1222,7 +1227,7 @@ async function reSummarizeAll() {
         await updateTokens();
         await popupConfirm(
             `✅ 重新总结完成！\n\n`
-            + `整合了 ${oldTexts.length} 条旧摘要\n`
+            + `整合了 ${taggedTexts.length} 条摘要标签内容\n`
             + `生成通道：${via === 'subapi' ? '副API' : '酒馆当前API'}\n`
             + `新摘要标题：${title}\n`
             + (wiName ? `已写入世界书：「${wiName}」` : ''),
@@ -1469,12 +1474,9 @@ async function runSummary(manual) {
         // 本次实际总结覆盖到的最后一楼（用于下次总结起点与隐藏范围）
         const lastSummarizedFloor = Math.max(...allRecords.map(r => r.msgId));
 
-        // chatText = 所有抓取记录的【完整内容】（r.content 是标签内全部文本，
-        // 不是标题；标题仅用于记录列表显示）
-        // 只发送抓取的原文内容本身，不加任何插件内置的标注/说明
-        const chatText = allRecords
-            .map(r => r.content)
-            .join('\n\n');
+        // 只发送摘要标签抓取的完整正文；title 仅用于界面显示
+        const taggedTexts = getTaggedContents(allRecords);
+        const chatText = taggedTexts.join('\n\n');
         // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
 
@@ -1966,20 +1968,21 @@ async function subApiFetchModels() {
     }
 }
 
-// 构造总结消息数组：[system 破限(可选)] → [system 总结指令] → [user 聊天内容]
+// 构造总结消息数组：破限提示词 → 摘要信息 → 总结提示词
 function buildSummaryMessages(chatText) {
     const st = sSync();
     const msgs = [];
-    // 提示词完全由用户填写：填了才发，插件不内置任何内容
     const jb = String(st.jailbreakPrompt || '').trim();
     const sp = String(st.summaryPrompt || '').trim();
+
     if (jb) {
         msgs.push({ role: 'system', content: jb });
     }
+    // 摘要正文必须位于两个提示词之间
+    msgs.push({ role: 'user', content: chatText });
     if (sp) {
         msgs.push({ role: 'system', content: sp });
     }
-    msgs.push({ role: 'user', content: chatText });
     return msgs;
 }
 
@@ -1996,9 +1999,8 @@ async function generateSummaryText(chatText) {
             toast(`⚠️ 副API失败（${e?.message || e}），改用酒馆当前API`, 'warning');
         }
     }
-    // 主 API：用户填写的 system 提示词前置（未填写则只有 chatText 本身）
-    const systemPart = messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
-    const prompt = systemPart ? `${systemPart}\n\n${chatText}` : chatText;
+    // 主 API 按 messages 原顺序拼接，保持：破限提示词 → 摘要信息 → 总结提示词
+    const prompt = messages.map(message => message.content).filter(Boolean).join('\n\n');
     const ctx = getContext();
     let out;
     try {
