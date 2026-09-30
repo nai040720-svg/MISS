@@ -524,3 +524,13 @@
 #missSummarySettings .miss-collapse-body {
     padding: 8px 2px 2px;
 }
+
+
+#missSummarySettings .miss-btn.danger {
+    color: var(--red, #ef6c6c);
+    border-color: var(--red, #ef6c6c);
+}
+#missSummarySettings .miss-btn.danger:hover {
+    color: #fff;
+    background: var(--red, #c62828);
+}
