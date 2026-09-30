@@ -328,6 +328,27 @@
     gap: 8px;
 }
 
+#missSummarySettings .miss-summary-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+#missSummarySettings .miss-summary-actions .miss-btn {
+    padding: 4px 6px;
+    font-size: 11px;
+}
+
+@media (max-width: 640px) {
+    #missSummarySettings #miss-summaries-list .miss-record-header {
+        flex-wrap: wrap;
+    }
+    #missSummarySettings .miss-summary-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+}
+
 #missSummarySettings .miss-record-title {
     font-size: 13px;
     font-weight: 600;
@@ -534,3 +555,4 @@
     color: #fff;
     background: var(--red, #c62828);
 }
+
