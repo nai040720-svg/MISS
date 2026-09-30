@@ -1308,7 +1308,7 @@ function restorePluginHiddenMessages(chat, store) {
         const message = chat[id];
         if (message) {
             message.is_system = !!original;
-            markMessageHiddenDom(id, false);
+            markMessageHiddenDom(id, !!original);
             changed = true;
         }
         delete hidden[rawId];
@@ -1747,7 +1747,10 @@ async function saveSummaryToWorldInfo(name, content) {
     // 插件只维护一个摘要条目，避免每次总结都把旧摘要重复注入
     const managed = Object.entries(data.entries)
         .filter(([, entry]) => String(entry?.comment || '').startsWith('Miss总结'));
-    const uid = managed.length ? Number(managed[0][0]) : 0;
+    const numericUids = Object.keys(data.entries).map(Number).filter(Number.isInteger);
+    const uid = managed.length
+        ? Number(managed[0][0])
+        : (numericUids.length ? Math.max(...numericUids) + 1 : 0);
     for (const [oldUid] of managed.slice(1)) {
         delete data.entries[oldUid];
     }
