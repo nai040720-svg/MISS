@@ -155,8 +155,10 @@ async function saveSettings() {
 }
 
 async function saveMetadata() {
+    const scope = chatScope();
     try {
         const fn = await getSaveMetadataFn();
+        assertChat(scope);
         // await 确保聊天元数据（含世界书绑定）真正落盘后再继续
         await fn();
     } catch (e) {
@@ -214,6 +216,44 @@ function sSync() {
 
 let lastTokenCount = 0;
 let busy = false;
+let chatEpoch = 0;
+let messageSequence = 0;
+
+function chatScope() {
+    const ctx = getContext();
+    if (ctx && !ctx.chatMetadata) ctx.chatMetadata = {};
+    return { chat: ctx?.chat, metadata: ctx?.chatMetadata, epoch: chatEpoch };
+}
+function isSameChat(scope) {
+    const ctx = getContext();
+    return scope.epoch === chatEpoch && scope.chat === ctx?.chat && scope.metadata === ctx?.chatMetadata;
+}
+function assertChat(scope) {
+    if (!isSameChat(scope)) throw new Error('聊天已切换，本次操作已停止，请回到原聊天重新操作');
+}
+function messageFingerprint(message) {
+    const text = JSON.stringify([message?.mes, message?.is_user, message?.name]);
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+    return `${text.length}:${hash >>> 0}`;
+}
+function messageUid(message) {
+    message.extra = message.extra || {};
+    if (!message.extra.missSummaryId) {
+        message.extra.missSummaryId = `miss-${Date.now()}-${++messageSequence}-${Math.random().toString(36).slice(2)}`;
+    }
+    return message.extra.missSummaryId;
+}
+function sourceReferences(ids, chat = getContext()?.chat || []) {
+    return ids.filter(id => chat[id]).map(id => ({ uid: messageUid(chat[id]), fingerprint: messageFingerprint(chat[id]) }));
+}
+function assertSources(scope, refs) {
+    assertChat(scope);
+    const current = new Map((scope.chat || []).filter(Boolean).map(m => [messageUid(m), messageFingerprint(m)]));
+    if (refs.some(ref => current.get(ref.uid) !== ref.fingerprint)) {
+        throw new Error('总结期间来源消息被修改或删除，本次结果未保存，请重新总结');
+    }
+}
 let activeResummaryMessageIds = new Set();
 let selectedHiddenIds = new Set();
 let hiddenSelectionChat = null;
@@ -284,7 +324,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.4.5');
+    log('loaded, version 0.4.6');
 }
 
 // ---------------- UI 构建 ----------------
@@ -618,7 +658,9 @@ function getStore() {
             if (!content) {
                 return null;
             }
-            return { ...item, content, title: String(item.title || content.split('\n')[0]).slice(0, 24) };
+            item.content = content;
+            item.title = String(item.title || content.split('\n')[0]).slice(0, 24);
+            return item;
         })
         .filter(Boolean);
     // 旧记录只有 upTo，按当时的相邻总结区间补齐楼层范围。
@@ -635,6 +677,35 @@ function getStore() {
     }
     if (!st.hiddenMessageIds || typeof st.hiddenMessageIds !== 'object') {
         st.hiddenMessageIds = {};
+    }
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const indices = new Map();
+    chat.forEach((message, index) => {
+        if (!message) return;
+        let uid = messageUid(message);
+        if (indices.has(uid)) {
+            delete message.extra.missSummaryId;
+            uid = messageUid(message);
+        }
+        indices.set(uid, index);
+    });
+    for (const summary of st.summaries) {
+        if (!Array.isArray(summary.sourceRefs)) summary.sourceRefs = sourceReferences(summaryMessageIds(summary), chat);
+        summary.sourceMsgIds = summary.sourceRefs.map(ref => indices.get(ref.uid)).filter(Number.isInteger);
+        summary.from = summary.sourceMsgIds.length ? Math.min(...summary.sourceMsgIds) : -1;
+        summary.upTo = summary.sourceMsgIds.length ? Math.max(...summary.sourceMsgIds) : -1;
+    }
+    if (!st.hiddenRefs) {
+        st.hiddenRefs = {};
+        for (const [id, original] of Object.entries(st.hiddenMessageIds)) {
+            if (chat[id]) st.hiddenRefs[messageUid(chat[id])] = original;
+        }
+    }
+    st.hiddenMessageIds = {};
+    for (const [uid, original] of Object.entries(st.hiddenRefs)) {
+        const id = indices.get(uid);
+        if (id !== undefined) st.hiddenMessageIds[id] = original;
+        else delete st.hiddenRefs[uid];
     }
     st.sendFullChat = !!st.sendFullChat;
     st.captureAllRecords = !!st.captureAllRecords;
@@ -707,6 +778,24 @@ function extractRecords() {
     return records;
 }
 
+function editableTagBlocks(text) {
+    const blocks = [];
+    const tags = cleanTagList(sSync().tag).split(',').filter(Boolean);
+    for (const tag of tags) {
+        for (const pattern of tagPatterns(tag)) {
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const openEnd = match[0].indexOf(match[0][0] === '<' ? '>' : ']') + 1;
+                blocks.push({ tag, start: match.index, end: match.index + match[0].length,
+                    raw: match[0], body: match[1], open: match[0].slice(0, openEnd),
+                    close: match[0].slice(openEnd + match[1].length) });
+            }
+        }
+    }
+    return blocks.sort((a, b) => a.start - b.start).filter((block, index, list) =>
+        !list.slice(0, index).some(previous => previous.end > block.start));
+}
+
 function buildUnifiedRecords() {
     const ctx = getContext();
     if (!Array.isArray(ctx?.chat)) return [];
@@ -721,11 +810,13 @@ function buildUnifiedRecords() {
         }
         const content = tagged.length ? tagged.join('\n') : String(m.mes).trim();
         if (!content) return;
+        const blocks = editableTagBlocks(m.mes);
         records.push({
             id: `m${idx}_${tagged.length ? 'tag' : 'context'}`,
             type: tagged.length ? 'extract' : 'context',
             title: (content.split('\n').find(line => line.trim()) || `楼层 ${idx + 1}`).trim().slice(0, 24),
-            content, msgId: idx, floor: idx + 1, sourceMessage: m.mes
+            content, msgId: idx, floor: idx + 1, sourceMessage: m.mes,
+            editContent: blocks.length > 1 ? blocks.map(block => block.raw).join('\n') : content,
         });
     });
     return records;
@@ -878,7 +969,9 @@ function taggedContentsFromText(text) {
 }
 
 async function prepareSummaryInputRecords(records, mode) {
+    const scope = chatScope();
     const { getRegexedString } = await getPromptRegexEngine();
+    assertChat(scope);
     const chat = getContext()?.chat || [];
     const visibleIds = chat.flatMap((message, id) => message && !message.is_system ? [id] : []);
     const depthById = new Map(visibleIds.map((id, index) => [id, visibleIds.length - index - 1]));
@@ -902,7 +995,10 @@ function summaryMessageIds(summary) {
 }
 
 function allSummarizedMessageIds(summaries = getStore().summaries) {
-    return new Set(summaries.flatMap(summaryMessageIds));
+    const chat = getContext()?.chat || [];
+    return new Set(summaries.flatMap(summary => summaryMessageIds(summary).filter(id =>
+        !summary.sourceRefs || summary.sourceRefs.some(ref => chat[id]
+            && ref.uid === messageUid(chat[id]) && ref.fingerprint === messageFingerprint(chat[id])))));
 }
 function getTaggedContents(records = extractRecords()) {
     return records.map(record => String(record?.content || '').trim()).filter(Boolean);
@@ -997,7 +1093,7 @@ async function renderRecords() {
         const open = recordsOpen.has(r.id) ? ' open' : '';
         const badge = r.type === 'context' ? `楼层 ${r.floor} · 无标签正文` : `楼层 ${r.floor}`;
         const isEditing = editingId === r.id;
-        const body = isEditing ? `<textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(rawById.get(r.id)?.content || '')}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
+        const body = isEditing ? `<div class="miss-hint">编辑原文；多标签请保留标签及顺序，只修改内部正文。</div><textarea class="miss-input" data-role="edit-text" rows="6">${escapeHtml(rawById.get(r.id)?.editContent ?? rawById.get(r.id)?.content ?? '')}</textarea><div class="miss-record-editbar"><button class="miss-btn" data-act="cancel-edit">取消</button><button class="miss-btn primary" data-act="save-edit">保存修改</button></div>` : `<div class="miss-record-content">${escapeHtml(r.content).replace(/\n/g, '<br>')}</div><div class="miss-record-editbar"><button class="miss-btn" data-act="start-edit">编辑模式</button></div>`;
         return `<div class="miss-record${open}" data-id="${r.id}"><div class="miss-record-header"><span class="miss-record-title">${escapeHtml(r.title)}</span><span class="miss-record-badge">${badge}</span></div><div class="miss-record-body">${body}</div></div>`;
     }).join(''));
     return recs.length;
@@ -1034,7 +1130,7 @@ function renderSummaries() {
         return `<div class="miss-record${open}" data-id="${r.id}">
             <div class="miss-record-header">
                 <span class="miss-record-title">${escapeHtml(r.title)}</span>
-                <span class="miss-record-badge" title="${escapeHtml(r.floorDetails)} 楼">${r.fromFloor}–${r.floor} 楼（${r.floorCount} 条）</span>
+                <span class="miss-record-badge" title="${escapeHtml(r.floorDetails)} 楼">${r.floorCount ? `${r.fromFloor}–${r.floor} 楼（${r.floorCount} 条）` : '来源楼层已删除'}</span>
                 <span class="miss-summary-actions">
                     <button class="miss-btn" data-summary-act="resummarize" title="只重新总结这些楼层"><i class="fa-solid fa-rotate-right"></i> 重新总结</button>
                     <button class="miss-btn danger" data-summary-act="delete" title="只删除这一条大总结"><i class="fa-solid fa-trash"></i> 删除</button>
@@ -1067,6 +1163,7 @@ async function hookTokenEvents() {
 }
 
 async function onPromptReady(data) {
+    const scope = chatScope();
     try {
         let text = '';
         if (Array.isArray(data?.chat)) {
@@ -1080,7 +1177,7 @@ async function onPromptReady(data) {
             return;
         }
         const n = await countTokens(text);
-        if (n > 0) {
+        if (n > 0 && isSameChat(scope)) {
             _lastPromptTokens = n;
             paintTokenDisplay(n);
         }
@@ -1112,6 +1209,7 @@ function paintTokenDisplay(n) {
 }
 
 async function updateTokens() {
+    const scope = chatScope();
     if (!$drawer || !$drawer.length) {
         return lastTokenCount;
     }
@@ -1146,7 +1244,7 @@ async function updateTokens() {
     } catch { /* ignore */ }
 
     const n = await countTokens(text);
-    paintTokenDisplay(n);
+    if (isSameChat(scope)) paintTokenDisplay(n);
     return lastTokenCount;
 }
 
@@ -1262,11 +1360,14 @@ function currentPresetName() {
 }
 
 async function deleteSummaryWorldInfoEntries() {
+    const scope = chatScope();
     const name = String(getContext()?.chatMetadata?.world_info || '').trim();
     if (!name) return;
     const wm = await wiMod();
+    assertChat(scope);
     if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) throw new Error('世界书模块不可用');
     const world = await wm.loadWorldInfo(name);
+    assertChat(scope);
     if (!world?.entries) return;
     let changed = false;
     for (const [key, entry] of Object.entries(world.entries)) {
@@ -1298,6 +1399,7 @@ async function restoreOrphanedHiddenFloors(messageIds, store) {
             markMessageHiddenDom(id, !!store.hiddenMessageIds[key]);
         }
         delete store.hiddenMessageIds[key];
+        if (chat[id]) delete store.hiddenRefs?.[messageUid(chat[id])];
         changed = true;
     }
     if (changed) await getContext()?.saveChat?.();
@@ -1306,6 +1408,7 @@ async function restoreOrphanedHiddenFloors(messageIds, store) {
 async function deleteSummaryAt(index) {
     if (busy) return;
     const store = getStore();
+    const scope = chatScope();
     const target = store.summaries[index];
     if (!target || !window.confirm(`确定只删除第 ${index + 1} 条大总结吗？它覆盖的独有隐藏楼层会恢复显示。`)) return;
     const previous = store.summaries.slice();
@@ -1317,6 +1420,7 @@ async function deleteSummaryAt(index) {
             -1,
         );
         await syncStoredSummariesWorldInfo(store.summaries);
+        assertChat(scope);
         await restoreOrphanedHiddenFloors(summaryMessageIds(target), store);
         await saveMetadata();
         renderSummaries();
@@ -1425,20 +1529,23 @@ async function bindUi() {
         renderHiddenSummaryPicker();
     });
     $('#miss-preview-btn', $drawer).on('click', async () => {
+        const scope = chatScope();
         const $preview = $('#miss-send-preview', $drawer);
         const previousPreset = currentPresetName();
         try {
             if (st_b()) await applyPreset(sSync().boundPreset);
+            assertChat(scope);
             const mode = currentSummaryMode();
-            const lastId = getStore().lastMessageId ?? -1;
+            const covered = allSummarizedMessageIds();
             let records = getSummaryInputRecords(mode);
-            if (mode === 'tags') records = records.filter(record => record.msgId > lastId);
+            if (mode === 'tags') records = records.filter(record => !covered.has(record.msgId));
             const prepared = await prepareSummaryInputRecords(records, mode);
+            assertChat(scope);
             $preview.val(prepared.length ? formatSummaryInput(prepared, mode) : '没有可发送的正文。').show();
         } catch (error) {
             $preview.val(`无法生成安全预览：${error?.message || error}`).show();
         } finally {
-            if (previousPreset && st_b() && previousPreset !== sSync().boundPreset) {
+            if (isSameChat(scope) && previousPreset && st_b() && previousPreset !== sSync().boundPreset) {
                 try { await applyPreset(previousPreset); } catch (error) { log('preview preset restore failed', error); }
             }
         }
@@ -1530,7 +1637,8 @@ async function bindUi() {
                 toast('内容不能为空', 'warning');
                 return;
             }
-            await saveEdit(rec, newText);
+            try { await saveEdit(rec, newText); }
+            catch (error) { toast(`保存失败：${error?.message || error}`, 'error'); }
         }
     });
 
@@ -1591,8 +1699,9 @@ function renderHiddenSummaryPicker() {
 
 // 临时恢复目标楼层以沿用酒馆提示词正则的深度，并在操作结束后恢复隐藏状态。
 async function withVisibleHiddenFloors(ids, action) {
+    const scope = chatScope();
     const chat = getContext()?.chat || [];
-    const snapshots = ids.filter(id => chat[id]).map(id => ({ id, hidden: !!chat[id].is_system }));
+    const snapshots = ids.filter(id => chat[id]).map(id => ({ id, message: chat[id], hidden: !!chat[id].is_system }));
     activeResummaryMessageIds = new Set(ids);
     try {
         for (const { id } of snapshots) {
@@ -1601,9 +1710,10 @@ async function withVisibleHiddenFloors(ids, action) {
         }
         return await action();
     } finally {
-        for (const { id, hidden } of snapshots) {
-            chat[id].is_system = hidden;
-            markMessageHiddenDom(id, hidden);
+        for (const { message, hidden } of snapshots) {
+            message.is_system = hidden;
+            const id = chat.indexOf(message);
+            if (isSameChat(scope) && id >= 0) markMessageHiddenDom(id, hidden);
         }
         activeResummaryMessageIds.clear();
     }
@@ -1617,6 +1727,7 @@ async function preparedHiddenSelection(ids) {
 }
 
 async function previewHiddenSelection() {
+    const scope = chatScope();
     const ids = selectedHiddenMessageIds();
     if (!ids.length) {
         toast(hiddenSummaryCandidates().length ? '请先选择要补总结的楼层' : '当前没有可补总结的隐藏楼层', 'warning');
@@ -1625,13 +1736,15 @@ async function previewHiddenSelection() {
     const previousPreset = currentPresetName();
     try {
         if (st_b()) await applyPreset(sSync().boundPreset);
+        assertChat(scope);
         const { mode, prepared } = await withVisibleHiddenFloors(ids, () => preparedHiddenSelection(ids));
+        assertChat(scope);
         $('#miss-hidden-preview', $drawer).val(prepared.length
             ? formatSummaryInput(prepared, mode) : '所选楼层没有可发送的正文。').show();
     } catch (error) {
         $('#miss-hidden-preview', $drawer).val(`无法生成安全预览：${error?.message || error}`).show();
     } finally {
-        if (st_b() && previousPreset && previousPreset !== sSync().boundPreset) {
+        if (isSameChat(scope) && st_b() && previousPreset && previousPreset !== sSync().boundPreset) {
             try { await applyPreset(previousPreset); } catch (error) { log('preset restore failed', error); }
         }
     }
@@ -1650,33 +1763,41 @@ async function summarizeHiddenSelection() {
         return;
     }
     const previousPreset = currentPresetName();
+    const scope = chatScope();
     busy = true;
     setBusy(true);
     try {
         if (st_b()) await applyPreset(sSync().boundPreset);
+        assertChat(scope);
         await withVisibleHiddenFloors(ids, async () => {
             const { mode, prepared } = await preparedHiddenSelection(ids);
+            assertChat(scope);
             if (!prepared.length) throw new Error('所选楼层没有可发送的正文，请检查过滤规则');
+            const refs = sourceReferences(prepared.map(record => record.msgId));
             const generated = await generateSummaryText(formatSummaryInput(prepared, mode));
+            assertSources(scope, refs);
             const content = String(generated.text || '').trim();
             if (!content) throw new Error('API 未返回完整总结内容');
             const sourceMsgIds = [...new Set(prepared.map(record => record.msgId))];
             const store = getStore();
             store.summaries.push({
                 title: (content.split('\n')[0] || '').trim().slice(0, 24),
-                content, ts: Date.now(), mode, sourceMsgIds,
+                content, ts: Date.now(), mode, sourceMsgIds, sourceRefs: refs,
                 from: Math.min(...sourceMsgIds), upTo: Math.max(...sourceMsgIds),
             });
             await saveMetadata();
+            assertChat(scope);
             if (sSync().wiEnabled) {
                 try {
                     await ensureChatWorldInfo();
+                    assertChat(scope);
                     await syncStoredSummariesWorldInfo(store.summaries);
                 } catch (error) {
                     log('worldinfo write failed', error);
                     toast(`⚠️ 世界书写入失败：${error?.message || error}`, 'warning');
                 }
             }
+            assertChat(scope);
             renderSummaries();
             renderRecords();
             await updateTokens();
@@ -1686,10 +1807,10 @@ async function summarizeHiddenSelection() {
     } catch (error) {
         await showSummaryFailure(error, '补总结');
     } finally {
-        try { await getContext()?.saveChat?.(); } catch (error) { log('restore hidden floors save failed', error); }
+        try { if (isSameChat(scope)) await getContext()?.saveChat?.(); } catch (error) { log('restore hidden floors save failed', error); }
         busy = false;
         setBusy(false);
-        if (st_b() && previousPreset && previousPreset !== sSync().boundPreset) {
+        if (isSameChat(scope) && st_b() && previousPreset && previousPreset !== sSync().boundPreset) {
             try { await applyPreset(previousPreset); } catch (error) { log('preset restore failed', error); }
         }
     }
@@ -1702,6 +1823,7 @@ async function reSummarizeAt(index) {
         return;
     }
     const store = getStore();
+    const scope = chatScope();
     const target = store.summaries[index];
     if (!target) return;
     const ids = summaryMessageIds(target);
@@ -1711,7 +1833,7 @@ async function reSummarizeAt(index) {
     }
 
     const chat = getContext()?.chat || [];
-    const snapshots = ids.filter(id => chat[id]).map(id => ({ id, isSystem: !!chat[id].is_system }));
+    const snapshots = ids.filter(id => chat[id]).map(id => ({ id, message: chat[id], isSystem: !!chat[id].is_system }));
     const previous = { ...target };
     const prevPreset = currentPresetName();
     const mode = currentSummaryMode();
@@ -1727,10 +1849,14 @@ async function reSummarizeAt(index) {
     try {
         const idSet = new Set(ids);
         if (st_b()) await applyPreset(sSync().boundPreset);
+        assertChat(scope);
         const sourceRecords = await prepareSummaryInputRecords(
             getSummaryInputRecords(mode, true).filter(record => idSet.has(record.msgId)), mode);
+        assertChat(scope);
         if (!sourceRecords.length) throw new Error('所选楼层没有当前模式可发送的正文，请检查摘要标签或开启全文。');
+        const refs = sourceReferences(sourceRecords.map(record => record.msgId));
         const generated = await generateSummaryText(formatSummaryInput(sourceRecords, mode));
+        assertSources(scope, refs);
         const content = String(generated.text || '').trim();
         if (!content) throw new Error('API 未返回完整总结内容');
 
@@ -1739,15 +1865,19 @@ async function reSummarizeAt(index) {
         target.ts = Date.now();
         target.mode = mode;
         target.sourceMsgIds = [...new Set(sourceRecords.map(record => record.msgId))];
+        target.sourceRefs = refs;
         target.from = Math.min(...target.sourceMsgIds);
         target.upTo = Math.max(...target.sourceMsgIds);
         target.resummarized = true;
         if (sSync().wiEnabled) {
             await ensureChatWorldInfo();
+            assertChat(scope);
             await syncStoredSummariesWorldInfo(store.summaries);
         }
+        assertChat(scope);
         await saveMetadata();
         replaced = true;
+        assertChat(scope);
         renderSummaries();
         renderRecords();
         await updateTokens();
@@ -1761,23 +1891,36 @@ async function reSummarizeAt(index) {
         await showSummaryFailure(e, '重新总结');
     } finally {
         activeResummaryMessageIds.clear();
-        for (const { id, isSystem } of snapshots) {
-            chat[id].is_system = isSystem;
-            markMessageHiddenDom(id, isSystem);
+        for (const { message, isSystem } of snapshots) {
+            message.is_system = isSystem;
+            const id = chat.indexOf(message);
+            if (isSameChat(scope) && id >= 0) markMessageHiddenDom(id, isSystem);
         }
-        if (replaced) {
-            await restoreOrphanedHiddenFloors(ids, store);
-            await saveMetadata();
+        if (replaced && isSameChat(scope)) {
+            try {
+                await restoreOrphanedHiddenFloors(ids, store);
+                assertChat(scope);
+                await getContext()?.saveChat?.();
+                assertChat(scope);
+                await saveMetadata();
+            } catch (error) {
+                log('resummary state save failed', error);
+                toast(`重新总结后保存状态失败：${error?.message || error}`, 'error');
+            }
         }
         busy = false;
         setBusy(false);
-        if (st_b() && prevPreset) {
-            setTimeout(() => applyPreset(prevPreset).catch(() => {}), 50);
+        if (isSameChat(scope) && st_b() && prevPreset) {
+            setTimeout(() => { if (isSameChat(scope)) applyPreset(prevPreset).catch(() => {}); }, 50);
         }
     }
 }
 
 async function onChatChanged() {
+    chatEpoch++;
+    _lastPromptTokens = 0;
+    lastTokenCount = 0;
+    activeResummaryMessageIds.clear();
     recordsOpen.clear();
     editingId = null;
     hiddenSelectionChat = null;
@@ -1794,6 +1937,7 @@ const debouncedAuto = debounce(() => {
 }, 1200);
 
 function onMessageChanged() {
+    _lastPromptTokens = 0;
     renderRecords();
     if ($('#miss-hidden-picker', $drawer).is(':visible')) renderHiddenSummaryPicker();
     debouncedAuto();
@@ -1822,6 +1966,7 @@ function restorePluginHiddenMessages(chat, store) {
         }
         delete hidden[rawId];
     }
+    store.hiddenRefs = {};
     return changed;
 }
 
@@ -1830,8 +1975,30 @@ function hideMessageByPlugin(message, id, store) {
     if (!Object.prototype.hasOwnProperty.call(store.hiddenMessageIds, String(id))) {
         store.hiddenMessageIds[String(id)] = !!message.is_system;
     }
+    store.hiddenRefs = store.hiddenRefs || {};
+    store.hiddenRefs[messageUid(message)] = store.hiddenMessageIds[String(id)];
     message.is_system = true;
     markMessageHiddenDom(id, true);
+}
+
+async function summaryWorldState(content, scope) {
+    const name = String(scope.metadata?.world_info || '').trim();
+    if (!name || !content) return { active: false, current: false };
+    try {
+        const wm = await wiMod();
+        assertChat(scope);
+        if (!wm?.loadWorldInfo) throw new Error('世界书模块不可用');
+        const world = await wm.loadWorldInfo(name);
+        assertChat(scope);
+        const entries = Object.values(world?.entries || {}).filter(entry =>
+            String(entry?.comment || '').startsWith('Miss总结') && entry.constant && !entry.disable);
+        return { active: entries.length > 0, current: entries.length === 1 && entries[0].content === content };
+    } catch (error) {
+        assertChat(scope);
+        log('world memory verification failed', error);
+        // 无法确认已有世界书的状态时保留聊天，避免重复注入或误隐藏。
+        return { active: true, current: false };
+    }
 }
 
 async function onGeneration() {
@@ -1840,14 +2007,31 @@ async function onGeneration() {
     const st = sSync();
     const keep = Number(st.keepVisibleFloors) || 0;
     const ctx = getContext();
+    const scope = chatScope();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     if (!chat.length) {
         return;
     }
 
     const store = getStore();
+    const content = store.summaries.map(summary => summary.content).filter(Boolean).join('\n---\n');
+    let memoryReady = false;
+    try {
+        const world = await summaryWorldState(content, scope);
+        assertChat(scope);
+        const pt = await getPromptTypesAsync();
+        const pr = await getPromptRolesAsync();
+        const sep = await getSetExtensionPrompt();
+        assertChat(scope);
+        const injection = !world.active && !st.autoHideFloors ? content : '';
+        sep(MODULE, injection, injection ? pt.IN_CHAT : pt.NONE, injection ? 4 : 0, false, pr.SYSTEM);
+        memoryReady = world.current || !!injection;
+    } catch (error) {
+        if (!isSameChat(scope)) return;
+        log('memory preparation failed', error);
+    }
     let changed = restorePluginHiddenMessages(chat, store);
-    const covered = allSummarizedMessageIds(store.summaries);
+    const covered = memoryReady ? allSummarizedMessageIds(store.summaries) : new Set();
 
     if (st.autoHideFloors) {
         // ===== 自动隐藏（用户最终规则：总结确认后，只保留最近一层角色的所有聊天内容，
@@ -1906,26 +2090,10 @@ async function onGeneration() {
 
     if (changed) {
         await saveMetadata();
+        assertChat(scope);
+        await ctx.saveChat?.();
     }
-
-    try {        // 注入摘要规则（功能4 最终版）：
-        // - 自动隐藏开启 → 不注入摘要（什么也不给）
-        // - 自定义隐藏楼层 → 注入摘要（补全被隐藏楼层的内容）
-        const injectEnabled = !st.autoHideFloors;
-        const pt = await getPromptTypesAsync();
-        const pr = await getPromptRolesAsync();
-        const sep = await getSetExtensionPrompt();
-        const texts = injectEnabled ? getStore().summaries.map(x => x.content).filter(Boolean) : [];
-        if (texts.length) {
-            // 直接注入摘要正文（不加插件内置的前缀/说明，遵守提示词只由用户规定）
-            const injection = texts.join('\n---\n');
-            sep(MODULE, injection, pt.IN_CHAT, 4, false, pr.SYSTEM);
-        } else {
-            sep(MODULE, '', pt.NONE, 0);
-        }
-    } catch (e) {
-        log('inject failed', e);
-    }
+    return { memoryReady };
 }
 
 // ---------------- 总结 ----------------
@@ -1948,9 +2116,9 @@ async function checkAuto() {
     const ctx = getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     const store = getStore();
-    const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
+    const covered = allSummarizedMessageIds(store.summaries);
     const newCount = new Set(getSummaryInputRecords()
-        .filter(record => record.msgId > lastId)
+        .filter(record => !covered.has(record.msgId))
         .map(record => record.msgId)).size;
     if (!newCount) return;
 
@@ -1974,6 +2142,7 @@ async function runSummary(manual) {
         return;
     }
     const ctx = getContext();
+    const scope = chatScope();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
     if (!chat.length) {
         if (manual) {
@@ -2007,6 +2176,7 @@ async function runSummary(manual) {
     }
     const prevPreset = currentPresetName();
     try {
+        assertChat(scope);
         const st = sSync();
         const store = getStore();
         const lastId = typeof store.lastMessageId === 'number' ? store.lastMessageId : -1;
@@ -2015,7 +2185,10 @@ async function runSummary(manual) {
         const mode = currentSummaryMode();
         let allRecords = getSummaryInputRecords(mode);
         const useFull = mode !== 'tags';
-        if (!useFull) allRecords = allRecords.filter(r => r.msgId > lastId);
+        if (!useFull) {
+            const covered = allSummarizedMessageIds(store.summaries);
+            allRecords = allRecords.filter(r => !covered.has(r.msgId));
+        }
         if (!allRecords.length) {
             if (manual) {
                 toast('没有新的摘要内容需要总结', 'info');
@@ -2026,7 +2199,9 @@ async function runSummary(manual) {
             const ok = await applyPreset(st.boundPreset);
             if (!ok) toast(`⚠️ 未找到预设「${st.boundPreset}」，使用当前预设总结`);
         }
+        assertChat(scope);
         allRecords = await prepareSummaryInputRecords(allRecords, mode);
+        assertChat(scope);
         if (!allRecords.length) {
             if (manual) toast('正文已被提示词正则全部隐藏，没有可发送的总结内容', 'warning');
             return;
@@ -2038,10 +2213,12 @@ async function runSummary(manual) {
         const chatText = formatSummaryInput(allRecords, mode);
         // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
+        const refs = sourceReferences(allRecords.map(record => record.msgId));
 
         let text, via;
         try {
             ({ text, via } = await generateSummaryText(prompt));
+            assertSources(scope, refs);
         } catch (e) {
             log('generateSummaryText failed', e);
             throw e;
@@ -2054,17 +2231,21 @@ async function runSummary(manual) {
             || `摘要 ${store.summaries.length + 1}`;
         const sourceMsgIds = [...new Set(allRecords.map(record => record.msgId))];
         store.summaries.push({
-            title, content, ts: Date.now(), mode, sourceMsgIds,
+            title, content, ts: Date.now(), mode, sourceMsgIds, sourceRefs: refs,
             from: Math.min(...sourceMsgIds), upTo: lastSummarizedFloor,
         });
         store.lastMessageId = Math.max(lastId, lastSummarizedFloor);
+        await ctx.saveChat?.();
+        assertChat(scope);
         await saveMetadata();
+        assertChat(scope);
 
         // 功能2：自动写入聊天世界书
         let wiName = '';
         if (sSync().wiEnabled) {
             try {
                 const wiTarget = await ensureChatWorldInfo();
+                assertChat(scope);
                 await syncStoredSummariesWorldInfo(store.summaries);
                 wiName = wiTarget;
             } catch (e) {
@@ -2072,15 +2253,18 @@ async function runSummary(manual) {
                 toast(`⚠️ 世界书写入失败：${e?.message || e}`, 'warning');
             }
         }
-
+        assertChat(scope);
+        renderSummaries();
         renderRecords();
         if ($('#miss-hidden-picker', $drawer).is(':visible')) renderHiddenSummaryPicker();
         await updateTokens();
+        assertChat(scope);
 
         // 勾选自动隐藏时，完成总结后立即应用隐藏规则，不等待下一次生成
         if (sSync().autoHideFloors) {
-            await onGeneration();
-            toast('✅ 已立即隐藏旧楼层（摘要通过世界书保留）', 'success');
+            const result = await onGeneration();
+            if (result?.memoryReady) toast('✅ 已立即隐藏旧楼层（摘要通过世界书保留）', 'success');
+            else toast('总结已保存，但世界书记忆尚未就绪，已保留原楼层', 'warning');
         } else if (manual) {
             await popupConfirm(
                 `✅ 总结已完成！\n\n`
@@ -2090,12 +2274,13 @@ async function runSummary(manual) {
             );
         }
         // 未勾选自动隐藏时，保留原有的手动确认流程
-        if (!sSync().autoHideFloors) {
+        if (!sSync().autoHideFloors && wiName) {
             const wantHide = await popupYesNo(
                 `总结已完成并写入世界书。\n\n是否要隐藏以上所有楼层（包括摘要）？\n`
                 + `选择「是」：只保留最近一层角色的所有聊天内容，其余楼层与摘要全部隐藏。\n`
                 + `选择「否」：保留所有楼层，仅按「隐藏楼层」设置正常隐藏。`,
             );
+            assertChat(scope);
             if (wantHide) {
                 sSync().autoHideFloors = true;
                 saveSettings();
@@ -2112,8 +2297,8 @@ async function runSummary(manual) {
     } finally {
         busy = false;
         setBusy(false);
-        if (st_b() && prevPreset) {
-            setTimeout(() => applyPreset(prevPreset).catch(() => { }), 50);
+        if (isSameChat(scope) && st_b() && prevPreset) {
+            setTimeout(() => { if (isSameChat(scope)) applyPreset(prevPreset).catch(() => {}); }, 50);
         }
     }
 }
@@ -2167,11 +2352,13 @@ function nextWiCounter() {
  * 2. 未绑定 → 自动创建「{角色名}总结世界书」并绑定为聊天世界书
  */
 async function ensureChatWorldInfo() {
+    const scope = chatScope();
+    const ctx = getContext();
     const wm = await wiMod();
+    assertChat(scope);
     if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) {
         throw new Error('world-info 模块不可用');
     }
-    const ctx = getContext();
     if (!ctx.chatMetadata || typeof ctx.chatMetadata !== 'object') {
         ctx.chatMetadata = {};
     }
@@ -2188,19 +2375,24 @@ async function ensureChatWorldInfo() {
     let n = 2;
     const MAX_TRIES = 50;
     while (n - 2 < MAX_TRIES && await worldExists(name)) {
+        assertChat(scope);
         name = `${baseName}${n}`;
         n++;
     }
+    assertChat(scope);
     await wm.saveWorldInfo(name, { entries: {} }, true);
+    assertChat(scope);
     try {
         if (typeof wm.updateWorldInfoList === 'function') {
             await wm.updateWorldInfoList();
         }
     } catch { /* ignore */ }
+    assertChat(scope);
     // 绑定为聊天世界书
     ctx.chatMetadata.world_info = name;
     try {
         const mod = await getSTModule();
+        assertChat(scope);
         if (mod?.saveMetadata) {
             await mod.saveMetadata();
         }
@@ -2237,7 +2429,9 @@ async function worldExists(name) {
 }
 
 async function saveSummaryToWorldInfo(name, content) {
+    const scope = chatScope();
     const wm = await wiMod();
+    assertChat(scope);
     if (!wm?.loadWorldInfo || !wm?.saveWorldInfo) {
         throw new Error('world-info 模块不可用');
     }
@@ -2247,6 +2441,7 @@ async function saveSummaryToWorldInfo(name, content) {
     try {
         data = await wm.loadWorldInfo(name);
     } catch { /* 不存在 */ }
+    assertChat(scope);
     if (!data || typeof data !== 'object' || !data.entries) {
         data = { entries: {} };
     }
@@ -2293,6 +2488,7 @@ async function saveSummaryToWorldInfo(name, content) {
         delay: null,
     };
     await wm.saveWorldInfo(name, data, true);
+    assertChat(scope);
 
     // 刷新 ST 世界书下拉列表（否则新世界书在 UI 列表里看不到）
     try {
@@ -2302,6 +2498,7 @@ async function saveSummaryToWorldInfo(name, content) {
     } catch (e) {
         log('updateWorldInfoList failed', e);
     }
+    assertChat(scope);
 
     // 绑定为聊天世界书（不是角色世界书、不是全局）
     try {
@@ -2313,6 +2510,7 @@ async function saveSummaryToWorldInfo(name, content) {
             ctx2.chatMetadata.world_info = name;
         }
         const mod = await getSTModule();
+        assertChat(scope);
         if (mod?.saveMetadata) {
             await mod.saveMetadata();
         }
@@ -2336,29 +2534,49 @@ async function saveSummaryToWorldInfo(name, content) {
 // ---------------- 编辑摘要 ----------------
 
 async function saveEdit(rec, newText) {
+    const scope = chatScope();
     const ctx = getContext();
     if (rec.type === 'extract') {
         const m = ctx.chat?.[rec.msgId];
-        if (m && typeof m.mes === 'string' && m.mes.includes(rec.content)) {
-            m.mes = m.mes.replace(rec.content, newText);
-            ctx.saveChat?.();
+        if (!m || (rec.sourceMessage !== undefined && m.mes !== rec.sourceMessage)) {
+            toast('来源消息已变化，请重新打开编辑', 'warning');
+            return;
         }
+        const blocks = editableTagBlocks(m.mes);
+        const replacements = blocks.length > 1 ? editableTagBlocks(newText) : null;
+        if (!blocks.length || (replacements && (replacements.length !== blocks.length
+            || replacements.some((block, i) => block.tag.toLowerCase() !== blocks[i].tag.toLowerCase())
+            || replacements.reduceRight((text, block) => text.slice(0, block.start) + text.slice(block.end), newText).trim()))) {
+            toast('多标签编辑请保留每个标签及顺序，只修改标签内正文', 'warning');
+            return;
+        }
+        let updated = m.mes;
+        for (let i = blocks.length - 1; i >= 0; i--) {
+            const block = blocks[i];
+            updated = updated.slice(0, block.start) + block.open
+                + (replacements ? replacements[i].body : newText) + block.close + updated.slice(block.end);
+        }
+        m.mes = updated;
+        await ctx.saveChat?.();
     } else if (rec.type === 'context') {
         const m = ctx.chat?.[rec.msgId];
-        if (m) { m.mes = newText; ctx.saveChat?.(); }
+        if (m) { m.mes = newText; await ctx.saveChat?.(); }
     } else if (rec.entry) {
         rec.entry.content = newText;
         rec.entry.title = (newText.split('\n')[0] || '').trim().slice(0, 24);
         await saveMetadata();
+        assertChat(scope);
         if (sSync().wiEnabled) {
             try {
                 await ensureChatWorldInfo();
+                assertChat(scope);
                 await syncStoredSummariesWorldInfo(getStore().summaries);
             } catch (e) {
                 log('worldinfo write failed (edit)', e);
             }
         }
     }
+    assertChat(scope);
     editingId = null;
     renderRecords();
     renderSummaries();
