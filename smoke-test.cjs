@@ -76,6 +76,7 @@ ready();
 assert.equal(menuInserted, true, 'settings failure must not block menu insertion');
 
 (async () => {
+    await reviewRegression();
     // 副API请求与同时进行的主聊天只读取各自的认证，不写共享 secrets。
     const mainConfig = Object.freeze({ temp_openai: 0.8, openai_max_tokens: 777, model: 'main-model', key: 'main-secret' });
     const beforeMain = JSON.stringify(mainConfig);
@@ -322,3 +323,100 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
 
     console.log('PASS: API isolation, no shared secret writes, no fallback or preset switching, keyless auth, summary and hidden-floor regression');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+async function reviewRegression() {
+    function fixture(chat, summaries = []) {
+        let current = { name: 'A', chat, chatMetadata: { missSummary: { summaries, lastMessageId: -1, hiddenMessageIds: {} } }, saveChat: async () => {} };
+        const original = current;
+        const jq = arg => {
+            if (typeof arg === 'function') return;
+            return new Proxy({ length: 1 }, { get: (object, key) => key in object ? object[key] : (() => key === 'is' ? false : jq('stub')) });
+        };
+        const box = { console: { log() {}, error() {} }, window: { jQuery: jq, __missApiChecked: true },
+            jQuery: jq, getContext: () => current, setTimeout: () => {}, TextDecoder };
+        vm.createContext(box);
+        vm.runInContext(source, box);
+        vm.runInContext(`
+            _settings = { tag: 'summary,memory', sendFullChat: false, subApi: { url: 'https://example.invalid' }, wiEnabled: false, autoHideFloors: false };
+            setBusy=()=>{}; currentPresetName=()=>null; saveMetadata=async()=>{}; renderRecords=()=>{};
+            renderSummaries=()=>{}; renderHiddenSummaryPicker=()=>{}; renderAll=()=>{}; updateTokens=async()=>{};
+            toast=()=>{}; popupConfirm=async()=>{}; popupYesNo=async()=>false; markMessageHiddenDom=()=>{};
+            getPromptRegexEngine=async()=>({getRegexedString:x=>x}); showSummaryFailure=async e=>{globalThis.failure=e.message};
+            getPromptTypesAsync=async()=>({IN_CHAT:1,NONE:-1}); getPromptRolesAsync=async()=>({SYSTEM:0});
+            getSetExtensionPrompt=async()=>((...args)=>{globalThis.injected=args[1]});
+        `, box);
+        return { box, ctx: original, run: code => vm.runInContext(code, box), switchTo: next => { current = next; } };
+    }
+    const redo = fixture([{ mes: '<summary>来源</summary>' }], [{ content: '旧总结', sourceMsgIds: [0], upTo: 0 }]);
+    redo.run("generateSummaryText=async()=>({text:'新总结',via:'subapi'})");
+    await redo.run('reSummarizeAt(0)');
+    assert.equal(redo.ctx.chatMetadata.missSummary.summaries[0].content, '新总结');
+
+    const edited = fixture([{ mes: '前文<summary>甲</summary>中间[memory]乙[/memory]后文' }]);
+    const raw = edited.ctx.chat[0].mes;
+    await edited.run("saveEdit(buildUnifiedRecords()[0],'<summary>新甲</summary>\\n[memory]新乙[/memory]')");
+    assert.equal(edited.ctx.chat[0].mes, '前文<summary>新甲</summary>中间[memory]新乙[/memory]后文');
+    const saved = edited.ctx.chat[0].mes;
+    await edited.run("saveEdit(buildUnifiedRecords()[0],'缺少标签')");
+    assert.equal(edited.ctx.chat[0].mes, saved);
+    assert.notEqual(saved, raw);
+
+    for (const action of ['summarizeHiddenSelection()', 'runSummary(true)', 'reSummarizeAt(0)']) {
+        const change = fixture([{ mes: '<summary>A剧情</summary>', is_system: action.startsWith('summarizeHidden') }],
+            action.startsWith('reSummarize') ? [{ content: 'A旧总结', sourceMsgIds: [0], upTo: 0 }] : []);
+        const other = { name: 'B', chat: [{ mes: 'B剧情' }], chatMetadata: { missSummary: { summaries: [], lastMessageId: -1, hiddenMessageIds: {} } } };
+        change.box.changeChat = () => change.switchTo(other);
+        change.run("selectedHiddenMessageIds=()=>[0]; generateSummaryText=async()=>{changeChat();return {text:'A的新总结',via:'subapi'}}");
+        await change.run(action);
+        assert.equal(other.chatMetadata.missSummary.summaries.length, 0, action + ' must not write into B');
+        assert.match(change.box.failure, /聊天已切换/);
+    }
+
+    const duringWrite = fixture([{ mes: 'A' }]);
+    const writeTarget = { chat: [{ mes: 'B' }], chatMetadata: {}, saveChat: async () => {} };
+    duringWrite.box.changeChat = () => duringWrite.switchTo(writeTarget);
+    duringWrite.run('wiMod=async()=>{changeChat();return {loadWorldInfo:async()=>({entries:{}}),saveWorldInfo:async()=>{throw Error("must not write")}}}');
+    await assert.rejects(duringWrite.run('ensureChatWorldInfo()'), /聊天已切换/);
+    assert.equal(writeTarget.chatMetadata.world_info, undefined);
+
+    const changedSource = fixture([{ mes: '<summary>原剧情</summary>' }]);
+    changedSource.run("generateSummaryText=async()=>{getContext().chat[0].mes='<summary>改写剧情</summary>';return {text:'过期结果',via:'subapi'}}");
+    await changedSource.run('runSummary(true)');
+    assert.equal(changedSource.ctx.chatMetadata.missSummary.summaries.length, 0);
+    assert.match(changedSource.box.failure, /来源消息被修改或删除/);
+
+    const moved = fixture([{ mes: 'A' }, { mes: 'B' }, { mes: 'C' }, { mes: 'D' }], [{ content: 'B的总结', sourceMsgIds: [1], upTo: 1 }]);
+    moved.run('getStore(); _settings.autoHideFloors=true; summaryWorldState=async()=>({active:true,current:true})');
+    moved.ctx.chat.splice(0, 1);
+    await moved.run('onGeneration()');
+    assert.equal(moved.ctx.chat[0].mes, 'B');
+    assert.equal(moved.ctx.chat[0].is_system, true);
+    assert.notEqual(moved.ctx.chat[1].is_system, true, 'C must not inherit B coverage');
+    moved.ctx.chat[0].mes = '修改后的B';
+    await moved.run('onGeneration()');
+    assert.equal(moved.ctx.chat[0].is_system, false, 'edited source must be visible again');
+    assert.equal(moved.run('allSummarizedMessageIds().size'), 0);
+    moved.ctx.chat[0] = { mes: '新插入楼层' };
+    assert.deepEqual(Array.from(moved.run('getStore().summaries[0].sourceMsgIds')), []);
+
+    const failedWorld = fixture([{ mes: '<summary>旧剧情</summary>' }, { mes: '<summary>新剧情</summary>' }]);
+    failedWorld.run("_settings.wiEnabled=true; _settings.autoHideFloors=true; generateSummaryText=async()=>({text:'大总结',via:'subapi'}); ensureChatWorldInfo=async()=>{throw Error('write failed')}");
+    await failedWorld.run('runSummary(true)');
+    assert.notEqual(failedWorld.ctx.chat[0].is_system, true, 'failed world write must not hide the source');
+    assert.equal(failedWorld.ctx.chatMetadata.missSummary.summaries.length, 1, 'keep the generated result');
+
+    const channels = fixture([{ mes: '正文' }], [{ content: '记忆', sourceMsgIds: [0], upTo: 0 }]);
+    channels.ctx.chatMetadata.world_info = 'book';
+    channels.run("wiMod=async()=>({loadWorldInfo:async()=>({entries:{0:{comment:'Miss总结',constant:true,disable:false,content:'记忆'}}})})");
+    await channels.run('onGeneration()');
+    assert.equal(channels.box.injected, '', 'active world memory must not be injected twice');
+    delete channels.ctx.chatMetadata.world_info;
+    await channels.run('onGeneration()');
+    assert.equal(channels.box.injected, '记忆', 'without a world entry use the direct channel');
+
+    channels.run('_lastPromptTokens=12345; lastTokenCount=12345');
+    await channels.run('onChatChanged()');
+    assert.equal(channels.run('_lastPromptTokens'), 0);
+    assert.equal(channels.run('lastTokenCount'), 0);
+    console.log('PASS: seven review regressions (chat scope, message identity, memory readiness, redo, multi-tag edit, single injection, token reset)');
+}
