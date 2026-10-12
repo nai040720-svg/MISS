@@ -76,6 +76,53 @@ ready();
 assert.equal(menuInserted, true, 'settings failure must not block menu insertion');
 
 (async () => {
+    // 副API请求与同时进行的主聊天只读取各自的认证，不写共享 secrets。
+    const mainConfig = Object.freeze({ temp_openai: 0.8, openai_max_tokens: 777, model: 'main-model', key: 'main-secret' });
+    const beforeMain = JSON.stringify(mainConfig);
+    sandbox.mainConfig = mainConfig;
+    vm.runInContext(`
+        getSTModule = async () => ({ getRequestHeaders: () => ({ 'Content-Type': 'application/json' }), oai_settings: mainConfig });
+        _settings.subApi = { url: 'https://summary.invalid/v1', source: 'openai', key: 'summary-secret', model: 'summary-model', temperature: '', stream: false };
+        _settings.boundPreset = 'summary-preset';
+    `, sandbox);
+    const requests = [];
+    sandbox.fetch = async (url, options) => {
+        assert.ok(['/api/backends/chat-completions/generate', '/api/backends/chat-completions/status'].includes(url), 'no shared settings or secret writes');
+        const body = JSON.parse(options.body);
+        assert.equal(body.chat_completion_source, 'custom');
+        assert.equal(body.custom_url, 'https://summary.invalid/v1');
+        assert.equal(typeof body.custom_include_headers, 'string', 'backend expects YAML text, not an object');
+        const upstreamHeaders = { Authorization: 'Bearer main-secret', ...JSON.parse(body.custom_include_headers) };
+        assert.notEqual(upstreamHeaders.Authorization, 'Bearer main-secret');
+        requests.push({ url, body, auth: upstreamHeaders.Authorization });
+        return { ok: true, json: async () => url.endsWith('/status')
+            ? { data: [{ id: 'summary-model' }] }
+            : { choices: [{ message: { content: '连接成功' }, finish_reason: 'stop' }] } };
+    };
+    const simultaneous = await Promise.all([
+        vm.runInContext('subApiTest()', sandbox),
+        vm.runInContext('subApiFetchModels()', sandbox),
+        Promise.resolve().then(() => assert.equal(JSON.stringify(mainConfig), beforeMain)),
+    ]);
+    assert.equal(simultaneous[0].ok, true);
+    assert.equal(simultaneous[1].ok, true);
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every(r => r.auth === 'Bearer summary-secret'));
+    assert.equal(requests.find(r => r.url.endsWith('/generate')).body.temperature, 0.8);
+    assert.equal(vm.runInContext('st_b()', sandbox), false, 'independent summary must never switch the main preset');
+    vm.runInContext("_settings.subApi.key = ''", sandbox);
+    await vm.runInContext("subApiGenerate([{role:'user', content:'test'}])", sandbox);
+    assert.equal(requests.at(-1).auth, '', 'keyless endpoint must not inherit main auth');
+    let mainCalls = 0;
+    context.generateQuietPrompt = async () => { mainCalls++; return '主连接结果'; };
+    sandbox.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: { message: '副密钥无效' } }) });
+    await assert.rejects(vm.runInContext("generateSummaryText('测试')", sandbox), /副密钥无效/);
+    assert.equal(mainCalls, 0, 'failed sub API must not take over the main connection');
+    vm.runInContext("_settings.subApi.url = ''", sandbox);
+    assert.equal((await vm.runInContext("generateSummaryText('测试')", sandbox)).via, 'main');
+    assert.equal(mainCalls, 1);
+    assert.equal(JSON.stringify(mainConfig), beforeMain);
+    vm.runInContext("_settings.boundPreset = ''; _settings.subApi = {}", sandbox);
     vm.runInContext(`
         getPromptRegexEngine = async () => ({
             getRegexedString: (input, placement, options) => {
@@ -165,6 +212,9 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
         window.__missApiChecked = true;
         _settings.wiEnabled = false;
         _settings.autoHideFloors = false;
+        _settings.subApi = { url: 'https://summary.invalid/v1' };
+        _settings.boundPreset = 'summary-preset';
+        applyPreset = async () => { throw new Error('must not change main preset'); };
         generateSummaryText = async text => { globalThis.lastSummaryInput = text; return { text: '大总结', via: 'subapi' }; };
     `, sandbox);
     await vm.runInContext('runSummary(true)', sandbox);
@@ -270,5 +320,5 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     assert.equal(context.chatMetadata.missSummary.lastMessageId, priorPointer);
     assert.deepEqual(Array.from(vm.runInContext('hiddenSummaryCandidates()', sandbox)), []);
 
-    console.log('PASS: summary input, multiple exclusion tags, hidden-floor selection and catch-up, API interruption');
+    console.log('PASS: API isolation, no shared secret writes, no fallback or preset switching, keyless auth, summary and hidden-floor regression');
 })().catch(error => { console.error(error); process.exitCode = 1; });
