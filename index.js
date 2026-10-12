@@ -284,7 +284,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.4.4');
+    log('loaded, version 0.4.5');
 }
 
 // ---------------- UI 构建 ----------------
@@ -322,7 +322,7 @@ function buildDrawer() {
                         <select id="miss-preset-select" class="miss-input">
                             <option value="">不绑定（默认）</option>
                         </select>
-                        <div class="miss-hint">选择一个预设并绑定摘要标签，切换预设即可使用对应的摘要标签抓取，无需手动保存。</div>
+                        <div class="miss-hint">使用主API总结时可切换绑定预设；配置副API后不切换酒馆预设，以保持主聊天连接独立。</div>
                     </div>
 
                     <div class="miss-field">
@@ -334,21 +334,21 @@ function buildDrawer() {
                             <div class="miss-field">
                                 <label for="miss-subapi-type"><i class="fa-solid fa-network-wired"></i> API 类型</label>
                                 <select id="miss-subapi-type" class="miss-input">
-                                    <option value="openai">Chat 补全（OpenAI 兼容 / Claude / Gemini 等）</option>
+                                    <option value="openai">Chat 补全（OpenAI 兼容接口）</option>
                                 </select>
                             </div>
                             <div class="miss-field" id="miss-subapi-source-row">
-                                <label for="miss-subapi-source"><i class="fa-solid fa-diagram-project"></i> Chat 补全来源</label>
+                                <label for="miss-subapi-source"><i class="fa-solid fa-diagram-project"></i> 服务商（需 OpenAI 兼容地址）</label>
                                 <select id="miss-subapi-source" class="miss-input">
                                     <option value="custom">自定义（兼容 OpenAI）</option>
                                     <option value="openai">OpenAI</option>
-                                    <option value="claude">Claude</option>
-                                    <option value="makersuite">Google AI (Gemini)</option>
+                                    <option value="claude">Claude（兼容接口）</option>
+                                    <option value="makersuite">Google AI (Gemini，兼容接口)</option>
                                     <option value="openrouter">OpenRouter</option>
                                     <option value="deepseek">DeepSeek</option>
                                     <option value="groq">Groq</option>
                                     <option value="mistralai">MistralAI</option>
-                                    <option value="cohere">Cohere</option>
+                                    <option value="cohere">Cohere（兼容接口）</option>
                                 </select>
                             </div>
                             <div class="miss-field">
@@ -377,7 +377,7 @@ function buildDrawer() {
                             <label class="miss-check" title="仅对插件总结生效：开启后副API以流式(SSE)方式返回总结内容；不影响酒馆主聊天的流式设置">
                                 <input id="miss-subapi-stream-chk" type="checkbox"> 总结时开启 AI 流式传输（仅对插件总结生效）
                             </label>
-                            <div id="miss-subapi-status" class="miss-hint" style="margin-top:6px;">未连接。总结时如绑定了副API将使用此 API 生成摘要；未绑定则使用酒馆当前连接的 API。</div>
+                            <div id="miss-subapi-status" class="miss-hint" style="margin-top:6px;">副API仅用于插件总结，不改变酒馆主连接；需填写 OpenAI 兼容地址。副API失败会报错，不自动转用主API。</div>
 
                             <div class="miss-field" style="margin-top:12px;">
                                 <div class="miss-collapse-header interactable" id="miss-subapi-saved-toggle" tabindex="0">
@@ -1428,7 +1428,7 @@ async function bindUi() {
         const $preview = $('#miss-send-preview', $drawer);
         const previousPreset = currentPresetName();
         try {
-            if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+            if (st_b()) await applyPreset(sSync().boundPreset);
             const mode = currentSummaryMode();
             const lastId = getStore().lastMessageId ?? -1;
             let records = getSummaryInputRecords(mode);
@@ -1438,7 +1438,7 @@ async function bindUi() {
         } catch (error) {
             $preview.val(`无法生成安全预览：${error?.message || error}`).show();
         } finally {
-            if (previousPreset && sSync().boundPreset && previousPreset !== sSync().boundPreset) {
+            if (previousPreset && st_b() && previousPreset !== sSync().boundPreset) {
                 try { await applyPreset(previousPreset); } catch (error) { log('preview preset restore failed', error); }
             }
         }
@@ -1624,14 +1624,14 @@ async function previewHiddenSelection() {
     }
     const previousPreset = currentPresetName();
     try {
-        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+        if (st_b()) await applyPreset(sSync().boundPreset);
         const { mode, prepared } = await withVisibleHiddenFloors(ids, () => preparedHiddenSelection(ids));
         $('#miss-hidden-preview', $drawer).val(prepared.length
             ? formatSummaryInput(prepared, mode) : '所选楼层没有可发送的正文。').show();
     } catch (error) {
         $('#miss-hidden-preview', $drawer).val(`无法生成安全预览：${error?.message || error}`).show();
     } finally {
-        if (sSync().boundPreset && previousPreset && previousPreset !== sSync().boundPreset) {
+        if (st_b() && previousPreset && previousPreset !== sSync().boundPreset) {
             try { await applyPreset(previousPreset); } catch (error) { log('preset restore failed', error); }
         }
     }
@@ -1653,7 +1653,7 @@ async function summarizeHiddenSelection() {
     busy = true;
     setBusy(true);
     try {
-        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+        if (st_b()) await applyPreset(sSync().boundPreset);
         await withVisibleHiddenFloors(ids, async () => {
             const { mode, prepared } = await preparedHiddenSelection(ids);
             if (!prepared.length) throw new Error('所选楼层没有可发送的正文，请检查过滤规则');
@@ -1681,7 +1681,6 @@ async function summarizeHiddenSelection() {
             renderRecords();
             await updateTokens();
             toast(`✅ 已补总结 ${sourceMsgIds.length} 楼`, 'success');
-            if (generated.fallbackError) toast(`⚠️ 副API异常，已改用主API：${generated.fallbackError}`, 'warning');
         });
         renderHiddenSummaryPicker();
     } catch (error) {
@@ -1690,7 +1689,7 @@ async function summarizeHiddenSelection() {
         try { await getContext()?.saveChat?.(); } catch (error) { log('restore hidden floors save failed', error); }
         busy = false;
         setBusy(false);
-        if (sSync().boundPreset && previousPreset && previousPreset !== sSync().boundPreset) {
+        if (st_b() && previousPreset && previousPreset !== sSync().boundPreset) {
             try { await applyPreset(previousPreset); } catch (error) { log('preset restore failed', error); }
         }
     }
@@ -1727,7 +1726,7 @@ async function reSummarizeAt(index) {
 
     try {
         const idSet = new Set(ids);
-        if (sSync().boundPreset) await applyPreset(sSync().boundPreset);
+        if (st_b()) await applyPreset(sSync().boundPreset);
         const sourceRecords = await prepareSummaryInputRecords(
             getSummaryInputRecords(mode, true).filter(record => idSet.has(record.msgId)), mode);
         if (!sourceRecords.length) throw new Error('所选楼层没有当前模式可发送的正文，请检查摘要标签或开启全文。');
@@ -1755,8 +1754,7 @@ async function reSummarizeAt(index) {
         await popupConfirm(
             '✅ 第 ' + (index + 1) + ' 条大总结已重新生成。\n'
             + '处理楼层：' + (target.from + 1) + '–' + (target.upTo + 1) + ' 楼\n'
-            + '生成通道：' + (generated.via === 'subapi' ? '副API' : '酒馆当前API')
-            + (generated.fallbackError ? '\n⚠️ 副API异常，已改用主API：' + generated.fallbackError : ''),
+            + '生成通道：' + (generated.via === 'subapi' ? '副API' : '酒馆当前API'),
         );
     } catch (e) {
         Object.assign(target, previous);
@@ -2024,7 +2022,7 @@ async function runSummary(manual) {
             }
             return;
         }
-        if (st.boundPreset) {
+        if (st_b()) {
             const ok = await applyPreset(st.boundPreset);
             if (!ok) toast(`⚠️ 未找到预设「${st.boundPreset}」，使用当前预设总结`);
         }
@@ -2041,9 +2039,9 @@ async function runSummary(manual) {
         // 提示词结构由 buildSummaryMessages 构造
         const prompt = chatText;
 
-        let text, via, fallbackError;
+        let text, via;
         try {
-            ({ text, via, fallbackError } = await generateSummaryText(prompt));
+            ({ text, via } = await generateSummaryText(prompt));
         } catch (e) {
             log('generateSummaryText failed', e);
             throw e;
@@ -2091,9 +2089,6 @@ async function runSummary(manual) {
                 + (wiName ? `已写入世界书：「${wiName}」（已绑定聊天世界书，条目蓝灯@D999）\n\n摘要可在「记忆总结」页查看。` : '\n摘要已存入记录。'),
             );
         }
-        if (fallbackError) {
-            await popupConfirm(`⚠️ 副API异常，已改用酒馆主API完成总结：${fallbackError}`);
-        }
         // 未勾选自动隐藏时，保留原有的手动确认流程
         if (!sSync().autoHideFloors) {
             const wantHide = await popupYesNo(
@@ -2124,7 +2119,7 @@ async function runSummary(manual) {
 }
 
 function st_b() {
-    return Boolean(sSync().boundPreset);
+    return Boolean(sSync().boundPreset) && !usesIndependentSubApi();
 }
 
 function setBusy(on) {
@@ -2224,7 +2219,7 @@ async function worldExists(name) {
         // 注意：loadWorldInfo 对不存在的文件后端返回 {entries:{}}（HTTP 200），
         // 无法用于探测存在性！改用 ST 的 world_names 列表（/api/settings/get 拉取）
         const mod = await getSTModule();
-        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+        const headers = mod?.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
         const resp = await fetch('/api/settings/get', {
             method: 'POST',
             headers,
@@ -2372,8 +2367,7 @@ async function saveEdit(rec, newText) {
 }
 
 // ---------------- 副API ----------------
-// 走 ST 后端代理：/api/backends/chat-completions/generate + chat_completion_source=custom
-// 密钥通过 /api/secrets/write 写入 api_key_custom，由后端读取
+// 借用酒馆后端转发，但地址与认证仅随本次请求传递，不写入酒馆共享密钥。
 
 function normalizeSubUrl(url) {
     let u = String(url || '').trim().replace(/\/+$/, '');
@@ -2383,20 +2377,22 @@ function normalizeSubUrl(url) {
     return u;
 }
 
-async function writeSecretKey(key) {
-    try {
-        const mod = await getSTModule();
-        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
-        const resp = await fetch('/api/secrets/write', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({ key: 'api_key_custom', value: String(key || '') }),
-        });
-        return resp.ok;
-    } catch (e) {
-        log('writeSecretKey failed', e);
-        return false;
-    }
+function usesIndependentSubApi() {
+    return !!String(sSync().subApi?.url || '').trim();
+}
+
+// custom_include_headers 在酒馆后端按 YAML 字符串解析，JSON 是其合法子集。
+// 即使未填写副密钥也显式覆盖 Authorization，避免携带酒馆已保存的 custom 密钥。
+function independentApiRequest(cfg) {
+    const url = normalizeSubUrl(cfg.url);
+    if (!url) throw new Error('副API地址为空');
+    return {
+        chat_completion_source: 'custom',
+        custom_url: url,
+        custom_include_headers: JSON.stringify({
+            Authorization: cfg.key ? `Bearer ${cfg.key}` : '',
+        }),
+    };
 }
 
 function parseSseEvent(line) {
@@ -2422,15 +2418,10 @@ function parseSseEvent(line) {
 
 async function subApiGenerate(messages, options = {}) {
     const st = sSync();
-    const cfg = st.subApi || {};
+    const cfg = { ...(st.subApi || {}) };
     const url = normalizeSubUrl(cfg.url);
     if (!url) {
         throw new Error('副API地址为空');
-    }
-    const source = String(cfg.source || 'custom');
-    // 先写入密钥到 ST secrets（CUSTOM 源从后端读取）
-    if (cfg.key) {
-        await writeSecretKey(cfg.key);
     }
     const stream = !!cfg.stream;
     // max_tokens / temperature：跟随酒馆当前设置（测试调用可显式覆盖）
@@ -2451,21 +2442,19 @@ async function subApiGenerate(messages, options = {}) {
     } catch { /* 取不到就跟随 API 默认 */ }
     // 用户在副API设置里自定义了温度则覆盖酒馆值
     const userTemp = Number(cfg.temperature);
-    if (Number.isFinite(userTemp)) {
+    if (cfg.temperature !== '' && cfg.temperature != null && Number.isFinite(userTemp)) {
         temperature = userTemp;
     }
     const body = {
-        chat_completion_source: source,
+        ...independentApiRequest(cfg),
         model: String(cfg.model || 'gpt-4o-mini'),
         messages,
         max_tokens: maxTokens,
         temperature,
         stream,
-        custom_url: url,
-        custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
     };
     const mod = await getSTModule();
-    const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+    const headers = mod?.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
     const resp = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers,
@@ -2550,28 +2539,18 @@ async function subApiTest() {
 async function subApiFetchModels() {
     try {
         const st = sSync();
-        const cfg = st.subApi || {};
+        const cfg = { ...(st.subApi || {}) };
         const url = normalizeSubUrl(cfg.url);
         if (!url) {
             return { ok: false, error: '副API地址为空' };
         }
-        const source = String(cfg.source || 'custom');
-        if (cfg.key) {
-            await writeSecretKey(cfg.key);
-        }
         const mod = await getSTModule();
-        const headers = mod.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+        const headers = mod?.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
         // 复用后端 status 端点拉取模型列表（source=custom 时读 custom_url）
         const resp = await fetch('/api/backends/chat-completions/status', {
             method: 'POST',
             headers,
-            body: JSON.stringify({
-                chat_completion_source: source,
-                reverse_proxy: url,
-                proxy_password: cfg.key || '',
-                custom_url: url,
-                custom_include_headers: cfg.key ? { Authorization: `Bearer ${cfg.key}` } : undefined,
-            }),
+            body: JSON.stringify(independentApiRequest(cfg)),
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || data.error) {
@@ -2604,20 +2583,11 @@ function buildSummaryMessages(chatText) {
     return msgs;
 }
 
-// 总结时选用的生成通道：副API → 酒馆当前 API
+// 填写副API地址时独立生成；仅未配置副API时使用酒馆主连接。
 async function generateSummaryText(chatText) {
-    const st = sSync();
     const messages = buildSummaryMessages(chatText);
-    let fallbackError = '';
-
-    if (st.subApi?.url) {
-        try {
-            return { text: await subApiGenerate(messages), via: 'subapi' };
-        } catch (e) {
-            fallbackError = e?.message || String(e);
-            log('subApi generate failed, fallback to ST API', e);
-            toast(`⚠️ 副API失败（${fallbackError}），改用酒馆当前API`, 'warning');
-        }
+    if (usesIndependentSubApi()) {
+        return { text: await subApiGenerate(messages), via: 'subapi' };
     }
     // 主 API 按 messages 原顺序拼接，保持：破限提示词 → 摘要信息 → 总结提示词
     const prompt = messages.map(message => message.content).filter(Boolean).join('\n\n');
@@ -2639,7 +2609,7 @@ async function generateSummaryText(chatText) {
     if (typeof out !== 'string' || !out.trim()) {
         throw new Error('总结生成失败（模型未返回内容）');
     }
-    return { text: out.trim(), via: 'main', fallbackError };
+    return { text: out.trim(), via: 'main' };
 }
 
 // ---------------- 副API UI ----------------
@@ -2649,7 +2619,7 @@ function renderSubApi() {
         return;
     }
     const st = sSync();
-    const cfg = st.subApi || {};
+    const cfg = { ...(st.subApi || {}) };
     $('#miss-subapi-type', $drawer).val(cfg.type || 'openai');
     $('#miss-subapi-source', $drawer).val(cfg.source || 'custom');
     $('#miss-subapi-url', $drawer).val(cfg.url || '');
@@ -2671,7 +2641,7 @@ function renderSubApi() {
     if (cfg.connected) {
         $status.html(`<span style="color:var(--green,#4caf50);">● 已连接</span> ${escapeHtml(cfg.model || cfg.url || '')}（总结时将使用此副API）`);
     } else {
-        $status.text('未连接。总结时如已填写副API将使用它生成摘要；未填写则使用酒馆当前连接的API。');
+        $status.text('未连接。填写副API地址后独立总结，失败不会转用主API；留空才使用酒馆主连接。');
     }
 }
 
