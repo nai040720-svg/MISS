@@ -324,7 +324,7 @@ async function init() {
     }
 
     initialized = true;
-    log('loaded, version 0.4.6');
+    log('loaded, version 0.4.7');
 }
 
 // ---------------- UI 构建 ----------------
@@ -2613,6 +2613,56 @@ function independentApiRequest(cfg) {
     };
 }
 
+// 连接/测试只处理副连接参数，不读取聊天、不修改主连接或全局生成锁。
+function subApiIdentity(cfg) {
+    return JSON.stringify([cfg?.url, cfg?.key, cfg?.model, cfg?.source, cfg?.temperature, !!cfg?.stream]);
+}
+
+function applySubApiCheck(cfg, result, kind) {
+    const current = sSync().subApi;
+    if (subApiIdentity(current) !== subApiIdentity(cfg)) return false;
+    current.connected = !!result.ok;
+    current.validation = result.ok ? kind : result.unverified ? 'unknown' : 'failed';
+    saveSettings();
+    return true;
+}
+
+async function subApiJsonRequest(endpoint, body) {
+    const mod = await getSTModule();
+    const headers = mod?.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
+    const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+    let data;
+    try { data = await response.json(); }
+    catch { throw new Error(response.ok ? '接口未返回有效 JSON，请检查 API 地址' : `HTTP ${response.status}：接口请求失败`); }
+    if (!response.ok || data?.error) {
+        const detail = data?.error?.message || data?.message
+            || (typeof data?.error === 'string' ? data.error : '')
+            || (typeof data?.response === 'string' ? data.response : '');
+        const error = new Error(detail || (response.ok ? '接口返回错误；请查看酒馆后台日志' : `HTTP ${response.status}`));
+        error.status = response.status;
+        error.bypass = !!data?.bypass;
+        throw error;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('接口返回格式不正确');
+    return data;
+}
+
+async function subApiCheckConnection(cfg = { ...(sSync().subApi || {}) }) {
+    try {
+        const data = await subApiJsonRequest('/api/backends/chat-completions/status', independentApiRequest(cfg));
+        if (data.bypass || !Array.isArray(data.data)) {
+            return { ok: false, unverified: true, error: '状态接口未验证成功，请填写模型后发送测试消息' };
+        }
+        return { ok: true, models: [...new Set(data.data.map(m => m?.id || m?.model || m?.name)
+            .filter(id => typeof id === 'string' && id.trim()))].sort() };
+    } catch (error) {
+        // 不支持模型列表不等于无法生成；认证失败则不能伪装成连接成功。
+        const unverified = error.status !== 401 && error.status !== 403
+            && (error.bypass || error.status === 404 || error.status === 405 || error.status === 501);
+        return { ok: false, unverified: !!unverified, error: error?.message || String(error) };
+    }
+}
+
 function parseSseEvent(line) {
     const trimmed = String(line || '').trim();
     if (!trimmed.startsWith('data:')) {
@@ -2742,12 +2792,23 @@ async function subApiGenerate(messages, options = {}) {
     return out;
 }
 
-async function subApiTest() {
+async function subApiTest(cfg = { ...(sSync().subApi || {}) }) {
     try {
-        const out = await subApiGenerate(
-            [{ role: 'user', content: '请只回复两个字：连接成功' }],
-            { maxTokens: 30 },
-        );
+        if (!String(cfg.model || '').trim()) throw new Error('请先填写或选择副 API 模型，再发送测试消息');
+        // 与酒馆 quiet 测试一致：独立短消息、非流式，不抓角色卡或聊天。
+        // 不固定 30 Token，也不套用正式总结的“摘要截断”判断。
+        const data = await subApiJsonRequest('/api/backends/chat-completions/generate', {
+            ...independentApiRequest(cfg), model: String(cfg.model).trim(),
+            messages: [{ role: 'user', content: 'Hi' }], stream: false,
+        });
+        const choice = data.choices?.[0];
+        const reason = choice?.finish_reason;
+        const text = choice?.message?.content ?? choice?.text ?? data.content?.[0]?.text;
+        const out = typeof text === 'string' ? text.trim() : '';
+        if (reason === 'length' || reason === 'max_tokens') {
+            return { ok: false, unverified: true, error: '接口已响应，但测试回复达到输出上限；尚未确认完整生成能力（不是摘要截断）', text: out.slice(0, 60) };
+        }
+        if (!out) return { ok: false, unverified: true, error: '接口已响应，但测试未返回正文；请检查模型或服务商设置' };
         return { ok: true, text: out.slice(0, 60) };
     } catch (e) {
         return { ok: false, error: e?.message || String(e) };
@@ -2755,32 +2816,7 @@ async function subApiTest() {
 }
 
 async function subApiFetchModels() {
-    try {
-        const st = sSync();
-        const cfg = { ...(st.subApi || {}) };
-        const url = normalizeSubUrl(cfg.url);
-        if (!url) {
-            return { ok: false, error: '副API地址为空' };
-        }
-        const mod = await getSTModule();
-        const headers = mod?.getRequestHeaders ? mod.getRequestHeaders() : { 'Content-Type': 'application/json' };
-        // 复用后端 status 端点拉取模型列表（source=custom 时读 custom_url）
-        const resp = await fetch('/api/backends/chat-completions/status', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(independentApiRequest(cfg)),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || data.error) {
-            throw new Error(data?.error?.message || `HTTP ${resp.status}`);
-        }
-        const ids = (data?.data || [])
-            .map(m => m?.id || m?.model || m?.name)
-            .filter(Boolean);
-        return { ok: true, models: [...new Set(ids)].sort() };
-    } catch (e) {
-        return { ok: false, error: e?.message || String(e) };
-    }
+    return subApiCheckConnection();
 }
 
 // 构造总结消息数组：破限提示词 → 摘要信息 → 总结提示词
@@ -2856,7 +2892,11 @@ function renderSubApi() {
     $sel.val(st.subApiActive && names.includes(st.subApiActive) ? st.subApiActive : '');
     // 状态行
     const $status = $('#miss-subapi-status', $drawer);
-    if (cfg.connected) {
+    if (cfg.validation === 'status') {
+        $status.text('状态检查通过（模型列表接口）；实际生成请点击“发送测试消息”。酒馆主 API 不受影响。');
+    } else if (cfg.validation === 'unknown') {
+        $status.text('生成能力尚未确认。状态接口不受支持、测试截断或空回复均不等于网络未连接，请查看测试提示。');
+    } else if (cfg.connected) {
         $status.html(`<span style="color:var(--green,#4caf50);">● 已连接</span> ${escapeHtml(cfg.model || cfg.url || '')}（总结时将使用此副API）`);
     } else {
         $status.text('未连接。填写副API地址后独立总结，失败不会转用主API；留空才使用酒馆主连接。');
@@ -2865,6 +2905,7 @@ function renderSubApi() {
 
 function readSubApiForm() {
     const st = sSync();
+    const previousIdentity = subApiIdentity(st.subApi);
     st.subApi = st.subApi || { type: 'openai', source: 'custom', url: '', key: '', model: '', connected: false, stream: false };
     st.subApi.type = 'openai';
     st.subApi.source = String($('#miss-subapi-source', $drawer).val() || 'custom');
@@ -2874,6 +2915,10 @@ function readSubApiForm() {
     st.subApi.stream = $('#miss-subapi-stream-chk', $drawer).prop('checked');
     const rawTemp = $('#miss-subapi-temperature', $drawer).val();
     st.subApi.temperature = rawTemp === '' || rawTemp == null ? '' : Math.min(2, Math.max(0, Number(rawTemp)));
+    if (subApiIdentity(st.subApi) !== previousIdentity) {
+        st.subApi.connected = false;
+        st.subApi.validation = '';
+    }
     return st.subApi;
 }
 
@@ -2896,10 +2941,12 @@ function bindSubApiUi() {
     $drawer.on('change', '#miss-subapi-source, #miss-subapi-url, #miss-subapi-key, #miss-subapi-model, #miss-subapi-temperature', function () {
         readSubApiForm();
         saveSettings();
+        renderSubApi();
     });
     $drawer.on('change', '#miss-subapi-stream-chk', function () {
         readSubApiForm();
         saveSettings();
+        renderSubApi();
         toast(sSync().subApi.stream ? '✅ 总结流式传输已开启' : '总结流式传输已关闭');
     });
 
@@ -2907,20 +2954,18 @@ function bindSubApiUi() {
         const $btn = $(this);
         $btn.prop('disabled', true);
         readSubApiForm();
-        const st = sSync();
-        st.subApi.connected = false;
-        saveSettings();
-        renderSubApi();
+        const cfg = { ...sSync().subApi };
         try {
-            const r = await subApiTest();
+            const r = await subApiCheckConnection(cfg);
+            if (!applySubApiCheck(cfg, r, 'status')) {
+                toast('副 API 配置已改变，已忽略旧连接检查结果', 'info');
+                return;
+            }
+            renderSubApi();
             if (r.ok) {
-                sSync().subApi.connected = true;
-                saveSettings();
-                renderSubApi();
-                toast(`✅ 副API连接成功：${r.text}`);
+                toast(`✅ 副 API 状态检查通过，获取到 ${r.models.length} 个模型；可发送测试消息验证生成`, 'success');
             } else {
-                renderSubApi();
-                toast(`❌ 连接失败：${r.error}`);
+                toast(`${r.unverified ? '⚠️ 状态未确认' : '❌ 状态检查失败'}：${r.error}。若接口不支持模型列表，可手填模型后发送测试消息。`, r.unverified ? 'warning' : 'error');
             }
         } finally {
             $btn.prop('disabled', false);
@@ -2931,14 +2976,15 @@ function bindSubApiUi() {
         const $btn = $(this);
         $btn.prop('disabled', true);
         readSubApiForm();
+        const cfg = { ...sSync().subApi };
         try {
-            const r = await subApiTest();
-            toast(r.ok ? `✅ 测试消息返回：${r.text}` : `❌ 测试失败：${r.error}`);
-            if (r.ok) {
-                sSync().subApi.connected = true;
-                saveSettings();
-                renderSubApi();
+            const r = await subApiTest(cfg);
+            if (!applySubApiCheck(cfg, r, 'test')) {
+                toast('副 API 配置已改变，已忽略旧测试结果', 'info');
+                return;
             }
+            renderSubApi();
+            toast(r.ok ? `✅ 测试消息返回：${r.text}` : `${r.unverified ? '⚠️ 测试未完成' : '❌ 测试失败'}：${r.error}`, r.ok ? 'success' : r.unverified ? 'warning' : 'error');
         } finally {
             $btn.prop('disabled', false);
         }
@@ -2948,8 +2994,13 @@ function bindSubApiUi() {
         const $btn = $(this);
         $btn.prop('disabled', true);
         readSubApiForm();
+        const identity = subApiIdentity(sSync().subApi);
         try {
             const r = await subApiFetchModels();
+            if (identity !== subApiIdentity(sSync().subApi)) {
+                toast('副 API 配置已改变，已忽略旧模型列表', 'info');
+                return;
+            }
             if (!r.ok) {
                 toast(`❌ 拉取模型失败：${r.error}`);
                 return;
@@ -3060,7 +3111,8 @@ async function applySubApiSnapshot(name) {
         url: snap.url || '',
         key: snap.key || '',
         model: snap.model || '',
-        connected: !!snap.connected,
+        connected: false,
+        validation: '',
         stream: !!snap.stream,
         temperature: snap.temperature ?? '',
     };

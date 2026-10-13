@@ -77,6 +77,7 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
 
 (async () => {
     await reviewRegression();
+    await connectionRegression();
     // 副API请求与同时进行的主聊天只读取各自的认证，不写共享 secrets。
     const mainConfig = Object.freeze({ temp_openai: 0.8, openai_max_tokens: 777, model: 'main-model', key: 'main-secret' });
     const beforeMain = JSON.stringify(mainConfig);
@@ -109,11 +110,13 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
     assert.equal(simultaneous[1].ok, true);
     assert.equal(requests.length, 2);
     assert.ok(requests.every(r => r.auth === 'Bearer summary-secret'));
-    assert.equal(requests.find(r => r.url.endsWith('/generate')).body.temperature, 0.8);
+    assert.equal(requests.find(r => r.url.endsWith('/generate')).body.stream, false);
+    assert.equal(requests.find(r => r.url.endsWith('/generate')).body.max_tokens, undefined);
     assert.equal(vm.runInContext('st_b()', sandbox), false, 'independent summary must never switch the main preset');
     vm.runInContext("_settings.subApi.key = ''", sandbox);
     await vm.runInContext("subApiGenerate([{role:'user', content:'test'}])", sandbox);
     assert.equal(requests.at(-1).auth, '', 'keyless endpoint must not inherit main auth');
+    assert.equal(requests.at(-1).body.temperature, 0.8, 'summary settings remain unchanged');
     let mainCalls = 0;
     context.generateQuietPrompt = async () => { mainCalls++; return '主连接结果'; };
     sandbox.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: { message: '副密钥无效' } }) });
@@ -323,6 +326,112 @@ assert.equal(menuInserted, true, 'settings failure must not block menu insertion
 
     console.log('PASS: API isolation, no shared secret writes, no fallback or preset switching, keyless auth, summary and hidden-floor regression');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+async function connectionRegression() {
+    const handlers = new Map();
+    const notices = [];
+    const jq = () => ({ on(event, selector, fn) { handlers.set(selector, fn); return this; }, prop() { return this; } });
+    const main = Object.freeze({ url: 'https://main.invalid/v1', model: 'main-model', key: 'main-secret' });
+    const box = { console: { log() {}, error() {} }, window: { jQuery: jq }, jQuery: () => {}, TextDecoder,
+        getContext: () => { throw new Error('connection/test must never read character or chat'); },
+        notices, main, setTimeout() {} };
+    vm.createContext(box);
+    vm.runInContext(source, box);
+    const run = code => vm.runInContext(code, box);
+    run(`
+        _settings={subApi:{url:'https://sub.invalid/v1',key:'sub-secret',model:'sub-model',stream:true},boundPreset:'summary-preset'};
+        $drawer={on:(...args)=>globalThis.register(...args)};
+        getSTModule=async()=>({getRequestHeaders:()=>({'Content-Type':'application/json'})});
+        saveSettings=async()=>{};renderSubApi=()=>{};readSubApiForm=()=>_settings.subApi;
+        toast=(text)=>notices.push(text);
+    `);
+    box.register = (event, selector, fn) => handlers.set(selector, fn);
+    run('bindSubApiUi()');
+    const calls = [];
+    box.fetch = async (url, options) => {
+        const body = JSON.parse(options.body);
+        calls.push({ url, body });
+        assert.equal(body.custom_url, 'https://sub.invalid/v1');
+        assert.equal(JSON.parse(body.custom_include_headers).Authorization, 'Bearer sub-secret');
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'sub-model' }] }) };
+    };
+    await handlers.get('#miss-subapi-connect-btn').call({});
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/api/backends/chat-completions/status');
+    assert.equal(calls[0].body.messages, undefined);
+    assert.equal(calls[0].body.model, undefined);
+    assert.equal(run('_settings.subApi.validation'), 'status');
+    assert.equal(run('st_b()'), false);
+
+    box.fetch = async (url, options) => {
+        const body = JSON.parse(options.body);
+        assert.equal(body.stream, false, 'test must ignore summary streaming');
+        assert.equal(body.max_tokens, undefined, 'test must not force 30 tokens');
+        assert.deepEqual(body.messages, [{ role: 'user', content: 'Hi' }]);
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'Hello' }, finish_reason: 'length' }] }) };
+    };
+    await handlers.get('#miss-subapi-test-btn').call({});
+    assert.equal(run('_settings.subApi.validation'), 'unknown');
+    assert.match(notices.at(-1), /接口已响应/);
+    assert.doesNotMatch(notices.at(-1), /连接失败/);
+    for (const [data, expected] of [
+        [{ choices: [{ message: { content: 'Hello' }, finish_reason: 'stop' }] }, true],
+        [{ choices: [{ message: { content: '' }, finish_reason: 'stop' }] }, false],
+    ]) {
+        box.fetch = async () => ({ ok: true, status: 200, json: async () => data });
+        const result = await run('subApiTest()');
+        assert.equal(result.ok, expected);
+        if (!expected) assert.equal(result.unverified, true);
+    }
+    for (const status of [401, 403, 404, 405, 501]) {
+        box.fetch = async () => ({ ok: false, status, json: async () => ({ message: 'HTTP ' + status }) });
+        const result = await run('subApiCheckConnection()');
+        assert.equal(result.ok, false);
+        assert.equal(result.unverified, [404, 405, 501].includes(status));
+    }
+    box.fetch = async () => ({ ok: true, status: 200, json: async () => ({ error: true, bypass: true }) });
+    assert.equal((await run('subApiCheckConnection()')).unverified, true);
+    box.fetch = async () => ({ ok: true, status: 200, json: async () => { throw Error('HTML response'); } });
+    assert.match((await run('subApiTest()')).error, /JSON/);
+    run("_settings.subApi.model=''");
+    box.fetch = async () => { throw Error('must validate model before request'); };
+    assert.match((await run('subApiTest()')).error, /模型/);
+    run("_settings.subApi.model='sub-model';globalThis.oldCfg={..._settings.subApi};_settings.subApi.url='https://new.invalid/v1'");
+    assert.equal(run("applySubApiCheck(oldCfg,{ok:true},'test')"), false);
+
+    // 两个实际模拟请求均进入网络等待，再一起释放；副连接不占用酒馆全局生成锁。
+    run("_settings.subApi.url='https://sub.invalid/v1';_settings.subApi.key='';globalThis.mainGenerating=true");
+    const pending = [];
+    box.fetch = (url, options) => {
+        const body = JSON.parse(options.body);
+        pending.push(body);
+        if (body.custom_url === main.url) {
+            assert.equal(JSON.parse(body.custom_include_headers).Authorization, 'Bearer main-secret');
+            assert.equal(body.model, main.model);
+        } else {
+            assert.equal(body.custom_url, 'https://sub.invalid/v1');
+            assert.equal(JSON.parse(body.custom_include_headers).Authorization, '');
+            assert.equal(body.model, 'sub-model');
+        }
+        return new Promise(resolve => {
+            releases.push(() => resolve({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'Hello' }, finish_reason: 'stop' }] }) }));
+        });
+    };
+    const releases = [];
+    const mainRequest = box.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify({
+        custom_url: main.url, model: main.model, custom_include_headers: JSON.stringify({ Authorization: 'Bearer main-secret' }),
+    }) });
+    const subRequest = run('subApiTest()');
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(pending.length, 2, 'main and sub requests must be in flight together');
+    releases.forEach(release => release());
+    const results = await Promise.all([mainRequest, subRequest]);
+    assert.equal(results[1].ok, true);
+    assert.equal(run('mainGenerating'), true);
+    assert.deepEqual(main, { url: 'https://main.invalid/v1', model: 'main-model', key: 'main-secret' });
+    console.log('PASS: distinct connect/test handlers, no-chat operation, test truncation, auth/status failures, stale config and simultaneous main/sub requests');
+}
 
 async function reviewRegression() {
     function fixture(chat, summaries = []) {
